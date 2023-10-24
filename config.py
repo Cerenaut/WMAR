@@ -3,8 +3,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal, Type, TypeVar, Union
 
-import gymnasium as gym
-from gymnasium.wrappers import TransformReward
+import gym
 
 import generate_trajectory
 import replay
@@ -36,20 +35,32 @@ class Serialisable:
 
 @dataclass
 class EnvConfig(Serialisable):
+    # Name like "CoinRun+NB+RT+MA"
     name: str
     kwargs: dict[str, Any] = field(default_factory=dict)
     rew_scale: float = 1
 
+    def __post_init__(self) -> None:
+        assert self.rew_scale == 1
+
     def get_function(self) -> Callable[[], Any]:
-        return lambda: TransformReward(
-            gym.make(
-                self.name,
-                frameskip=1,
-                repeat_action_probability=0,
-                full_action_space=True,
-                **self.kwargs,
-            ),
-            lambda x: self.rew_scale * x,
+        default = {
+            "use_backgrounds": True,
+            "restrict_themes": False,
+            "use_monochrome_assets": False,
+        }
+        mods = {
+            "NB": {"use_backgrounds": False},
+            "RT": {"restrict_themes": True},
+            "MA": {"use_monochrome_assets": True}
+        }
+        parts = self.name.split("+")
+        assert parts[0] == "CoinRun"
+        for part in parts[1:]:
+            default.update(mods[part])
+        return lambda: gym.make(
+            "procgen:procgen-coinrun-v0",
+            **default,
         )
 
 
@@ -116,7 +127,7 @@ class Config(Serialisable):
 
     n_sync: int = 2
     gen_seq_len: int = 4096
-    env_repeat: int = 4
+    env_repeat: int = 1
     data_n: int = 16
     data_n_max: int = 512
     data_t: int = 512
@@ -152,6 +163,7 @@ class Config(Serialisable):
         assert self.n_sync * self.gen_seq_len == self.data_n * self.data_t
         assert self.random_policy in {"first", "new"}
         assert self.replay_buffers != []
+        assert self.env_repeat == 1, "Env repeat disabled for procgen"
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)

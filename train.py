@@ -36,10 +36,10 @@ if __name__ == "__main__":
         esc=EnvScheduleConfig(
             env_schedule_type=SequentialEnvironments,
             env_configs=[
-                EnvConfig("ALE/MsPacman-v5", rew_scale=0.05),
-                EnvConfig("ALE/Boxing-v5"),
-                EnvConfig("ALE/CrazyClimber-v5", rew_scale=0.001),
-                EnvConfig("ALE/Frostbite-v5", rew_scale=0.2),
+                EnvConfig("CoinRun"),
+                EnvConfig("CoinRun+NB"),
+                EnvConfig("CoinRun+NB+RT"),
+                EnvConfig("CoinRun+NB+RT+MA"),
             ],
             kwargs={"swap_sched": 90},
         ),
@@ -53,7 +53,7 @@ if __name__ == "__main__":
         fresh_ac=False,
         n_sync=4,
         gen_seq_len=4096,
-        env_repeat=4,
+        env_repeat=1,
         data_n=32,
         data_n_max=512,
         data_t=512,
@@ -70,7 +70,7 @@ if __name__ == "__main__":
         mlp_features=512,
         mlp_layers=2,
         wall_time_optimisation=False,
-        action_space=18,
+        action_space=15,
         replay_buffers=[
             RbConfig(replay.FifoReplay, "cuda"),
             RbConfig(replay.LongTermReplay, "cuda"),
@@ -134,6 +134,7 @@ if __name__ == "__main__":
                 config.data_n,
             )
             replay.add(_acts, _obss, _rews, _conts, _resets)
+        envs.step()
         print(f"{replay.n_valid=}")
 
         rews_eps_mean = _rews.sum().item() / _resets.sum().item()
@@ -159,7 +160,7 @@ if __name__ == "__main__":
                     ac=aco.ac if aco is not None else aco,
                     env_fns=env_fns,
                     env_repeat=config.env_repeat,
-                    n_rollouts=16,
+                    n_rollouts=256,
                 )
                 eval_results_mean.append(ev_eps_mean)
                 eval_results_std.append(ev_eps_std)
@@ -194,7 +195,7 @@ if __name__ == "__main__":
 
             loss, metrics = wm.compute_loss(mb_acts, mb_obss, mb_rews, mb_conts, mb_resets)
 
-            opt.zero_grad()
+            opt.zero_grad(set_to_none=True)
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(wm.parameters(), 1000)
             opt.step()

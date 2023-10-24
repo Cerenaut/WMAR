@@ -122,7 +122,7 @@ def dream_rollout(
 ) -> tuple[AcStateT, ActionT, RewardT, ReturnT]:
     # Returns: (T=n_steps N=n_sync)
     # States [ T N n_dis n_cls ]
-    # Actions [ T N 18 ]
+    # Actions [ T N 15 ]
     # Rewards [ T N 1 ]
     # Lambda returns: [ T N 1 ]
     z, h = wm.rssm.initial_state(n_sync)

@@ -1,12 +1,10 @@
 from typing import Any, Callable, Optional
 
 import cv2
-import gymnasium as gym
+import gym
 import numpy as np
 import torch
 import torch.distributions as td
-from gymnasium.vector import AsyncVectorEnv
-from gymnasium.wrappers import AtariPreprocessing
 from tqdm import tqdm
 
 from ac import ActorCritic, zh_to_ac_state
@@ -149,10 +147,11 @@ def generate_trajectories(
     wm: Optional[WorldModel] = None,
     ac: Optional[ActorCritic] = None,
     env_fns: Optional[list[Callable[[], Any]]] = None,
-    env_repeat: int = 4,
+    env_repeat: int = 1,
     target_terminals: Optional[int] = None,
     no_images: bool = False,
-) -> tuple[ActionT, Optional[ImageT], RewardT, ContT, ResetT]:
+) -> tuple[ActionT, ImageT, RewardT, ContT, ResetT]:
+    assert env_repeat == 1
     # Returns [ X ... ] packed as [ N*T ... ] (sort of)
     # To change to [ T N ... ], do reshape and swapaxes
     # `target_terminals` if not None, forces at least some number of environment resets
@@ -171,26 +170,17 @@ def generate_trajectories(
     n_samples = 0
     n_terminals = 0
 
-    env = AsyncVectorEnv(
+    env = SyncVectorEnvAtHome(
         [
-            *map(
-                lambda env: lambda: AtariPreprocessing(
-                    env(), frame_skip=env_repeat, screen_size=64, grayscale_obs=False
-                ),
-                [
-                    env_fns[i]
-                    if env_fns is not None
-                    else (
-                        lambda: gym.make(
-                            "ALE/DonkeyKong-v5",
-                            frameskip=1,
-                            repeat_action_probability=0,
-                        )
-                    )
-                    for i in range(n_sync)
-                ],
+            env_fns[i]
+            if env_fns is not None
+            else (
+                lambda: gym.make(
+                    "procgen:procgen-coinrun-v0",
+                )
             )
-        ],
+            for i in range(n_sync)
+        ]
     )
     z = None
 
@@ -205,7 +195,7 @@ def generate_trajectories(
                 break
             if n_samples == 0:  # First step
                 n_samples += n_sync
-                obs, _ = env.reset()
+                obs = env.reset()
                 for i in range(n_sync):
                     acts[i].append(0)
                     obss[i].append(obs[i])
@@ -217,11 +207,11 @@ def generate_trajectories(
 
             n_samples += n_sync
             if wm is None or ac is None:
-                act = np.random.randint(0, 18, size=n_sync)
+                act = np.random.randint(0, 15, size=n_sync)
             else:
                 if z is None:
                     z, h = wm.rssm.initial_state(n_sync)
-                    act_t = torch.zeros(n_sync, 18, device=z.device)
+                    act_t = torch.zeros(n_sync, 15, device=z.device)
                     act_t[:, 0] = 1  # Previous move would have been all 0s
                 # Follow a stochastic policy
                 _, z, h = wm.rssm(
@@ -235,11 +225,10 @@ def generate_trajectories(
                 act_prob = ac.actor(ac_state)
                 act_prob_dist = td.Categorical(logits=act_prob)
                 act = act_prob_dist.sample()
-                act_t = torch.nn.functional.one_hot(act, 18)
+                act_t = torch.nn.functional.one_hot(act, 15)
                 act = act.cpu().numpy()
 
-            obs, rew, term, trunc, _ = env.step(act)
-            reset = term | trunc
+            obs, rew, reset, _ = env.step(act)
             # When there is an episode termination (`reset`):
             # `obs` is of the new episode
             # `rew` is of the previous episode
@@ -266,7 +255,7 @@ def generate_trajectories(
     resets = [np.stack(e) for e in resets]
 
     return (
-        torch.nn.functional.one_hot(torch.from_numpy(np.concatenate(acts)[:n]).long(), 18).float(),
+        torch.nn.functional.one_hot(torch.from_numpy(np.concatenate(acts)[:n]).long(), 15).float(),
         torch.from_numpy(np.concatenate(obss)[:n] / 255).float().permute(0, 3, 1, 2)
         if not no_images
         else None,
@@ -282,7 +271,7 @@ def reinterpret_nt_to_t_n(
     if t * n != acts.shape[0]:
         raise ValueError(f"Illegal reinterpret (acts.shape={acts.shape}[0] != {t * n})")
     return (
-        acts.reshape(n, t, 18).swapaxes(0, 1),
+        acts.reshape(n, t, 15).swapaxes(0, 1),
         obss.reshape(n, t, 3, 64, 64).swapaxes(0, 1),
         rews.reshape(n, t, 1).swapaxes(0, 1),
         conts.reshape(n, t, 1).swapaxes(0, 1),

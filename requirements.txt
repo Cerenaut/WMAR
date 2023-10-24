@@ -1,0 +1,5 @@
+gymnasium==0.28.1
+numpy
+sortedcontainers
+torch
+tqdm

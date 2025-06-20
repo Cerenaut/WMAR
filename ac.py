@@ -189,9 +189,10 @@ def train_ac_from_wm(
     dream_steps: int = 16,
     aco: Optional[ActorCriticOpt] = None,
     lr: float = 3e-5,
+    device: str = 'cuda',
 ) -> tuple[ActorCriticOpt, torch.Tensor]:
     if aco is None:
-        ac = ActorCritic(np.prod(wm.ls) + wm.h_dim, wm.a_dim).cuda()
+        ac = ActorCritic(np.prod(wm.ls) + wm.h_dim, wm.a_dim).to(device)
         aco = ActorCriticOpt(ac, Adam(ac.parameters(), lr=lr))
     ac, opt = aco
     for g in opt.param_groups:

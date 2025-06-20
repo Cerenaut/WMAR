@@ -19,6 +19,10 @@ from generate_trajectory import (
 )
 from wm import WorldModel
 
+# define the device instead of requiring CUDA
+device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
+print(f"Using {device} device")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", help="Configuration file")
@@ -55,7 +59,7 @@ if __name__ == "__main__":
         gen_seq_len=4096,
         env_repeat=4,
         data_n=32,
-        data_n_max=512,
+        data_n_max=128, #512
         data_t=512,
         mb_t_size=32,
         mb_n_size=16,
@@ -72,8 +76,8 @@ if __name__ == "__main__":
         wall_time_optimisation=False,
         action_space=18,
         replay_buffers=[
-            RbConfig(replay.FifoReplay, "cuda"),
-            RbConfig(replay.LongTermReplay, "cuda"),
+            RbConfig(replay.FifoReplay, device),
+            RbConfig(replay.LongTermReplay, device),
         ],
     )
     config = config if config is not None else default_config
@@ -90,7 +94,10 @@ if __name__ == "__main__":
         config.mlp_features,
         config.mlp_layers,
         config.wall_time_optimisation,
-    ).cuda()
+    )
+    wm.compile()
+    wm.to(device)
+    
     opt = Adam(wm.parameters(), lr=config.wm_lr)
 
     envs = config.get_env_schedule()
@@ -185,11 +192,11 @@ if __name__ == "__main__":
         for _ in progbar:
             if epoch > 0 or not config.pretrain_enabled:
                 mb_acts, mb_obss, mb_rews, mb_conts, mb_resets = replay.minibatch(
-                    config.mb_t_size, config.mb_n_size
+                    config.mb_t_size, config.mb_n_size, mb_device=device
                 )
             else:
                 mb_acts, mb_obss, mb_rews, mb_conts, mb_resets = replay.minibatch(
-                    config.pretrain_mb_t_size, config.pretrain_mb_n_size
+                    config.pretrain_mb_t_size, config.pretrain_mb_n_size, mb_device=device
                 )
 
             loss, metrics = wm.compute_loss(mb_acts, mb_obss, mb_rews, mb_conts, mb_resets)
@@ -210,7 +217,7 @@ if __name__ == "__main__":
                         writer.add_scalar(metric_key, metric_value, global_step)
 
                     if log_images:
-                        original = _obss[:16, 0:2].cuda()
+                        original = _obss[:16, 0:2].to(device)
                         writer.add_images(
                             "original", original.swapaxes(0, 1).flatten(0, 1), global_step
                         )
@@ -218,7 +225,7 @@ if __name__ == "__main__":
                         init_z, init_h = wm.rssm.initial_state(original.shape[1])
                         no_resets = torch.zeros(*original.shape[:2], 1, device=init_z.device)
                         z_posts, z, h = wm.rssm(
-                            init_z, _acts[:, 0:2].cuda(), init_h, original, no_resets
+                            init_z, _acts[:, 0:2].to(device), init_h, original, no_resets
                         )
                         zhs = wm.zh_transform(z, h)
                         recon = torch.stack([wm.decoder(zh) for zh in zhs])
@@ -248,6 +255,7 @@ if __name__ == "__main__":
                 config.ac_train_sync,
                 dream_steps=16,
                 lr=4e-4,
+                device=device,
             )
         else:
             aco, approx_perf = train_ac_from_wm(
@@ -258,6 +266,7 @@ if __name__ == "__main__":
                 dream_steps=16,
                 aco=aco,
                 lr=1e-4,
+                device=device,
             )
 
         writer.add_scalar("Perf/approx_perf", approx_perf, global_step)

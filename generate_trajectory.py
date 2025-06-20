@@ -2,6 +2,7 @@ from typing import Any, Callable, Optional
 
 import cv2
 import gymnasium as gym
+import ale_py
 import numpy as np
 import torch
 import torch.distributions as td

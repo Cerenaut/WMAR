@@ -1,7 +1,7 @@
 import argparse
 from pathlib import Path
 from typing import Optional
-
+import ale_py
 import numpy as np
 import torch
 from torch.optim import Adam

@@ -59,7 +59,7 @@ if __name__ == "__main__":
         gen_seq_len=4096,
         env_repeat=4,
         data_n=32,
-        data_n_max=128, #512 changed for local testing on Macbook
+        data_n_max=512, #512 changed for local testing on Macbook
         data_t=512,
         mb_t_size=32,
         mb_n_size=16,
@@ -96,6 +96,11 @@ if __name__ == "__main__":
         config.wall_time_optimisation,
     )
     wm.compile()
+    
+    if torch.cuda.device_count() > 1:
+      print("Using", torch.cuda.device_count(), "GPUs")
+      model = torch.nn.DataParallel(model)
+    
     wm.to(device)
     
     opt = Adam(wm.parameters(), lr=config.wm_lr)

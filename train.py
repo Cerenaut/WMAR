@@ -100,6 +100,7 @@ if __name__ == "__main__":
     if torch.cuda.device_count() > 1:
       print("Using", torch.cuda.device_count(), "GPUs")
       model = torch.nn.DataParallel(model)
+
     
     wm.to(device)
     

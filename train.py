@@ -19,7 +19,7 @@ from generate_trajectory import (
 )
 from wm import WorldModel
 
-# define the device instead of requiring CUDA
+# define the device for accelerator support beyond CUDA
 device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
 print(f"Using {device} device")
 
@@ -59,7 +59,7 @@ if __name__ == "__main__":
         gen_seq_len=4096,
         env_repeat=4,
         data_n=32,
-        data_n_max=128, #512
+        data_n_max=128, #512 changed for local testing on Macbook
         data_t=512,
         mb_t_size=32,
         mb_n_size=16,
@@ -76,8 +76,8 @@ if __name__ == "__main__":
         wall_time_optimisation=False,
         action_space=18,
         replay_buffers=[
-            RbConfig(replay.FifoReplay, device),
-            RbConfig(replay.LongTermReplay, device),
+            RbConfig(replay.FifoReplay, "cpu"),
+            RbConfig(replay.LongTermReplay, "cpu"),
         ],
     )
     config = config if config is not None else default_config

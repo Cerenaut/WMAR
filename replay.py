@@ -162,3 +162,4 @@ class MultiTypeReplay(Replay):
 
     def minibatch(self, mb_t: int, mb_n: int, mb_device: str = "cuda") -> tuple[ActionT, ImageT, RewardT, ContT, ResetT]:
         return random.choice(self.replays).minibatch(mb_t, mb_n, mb_device)
+

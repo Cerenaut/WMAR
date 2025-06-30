@@ -1,7 +1,10 @@
 import argparse
 from pathlib import Path
 from typing import Optional
-
+# This is how tensorboard names the folder
+import os
+import socket
+from datetime import datetime
 import numpy as np
 import torch
 from torch.optim import Adam
@@ -22,6 +25,9 @@ from wm import WorldModel
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", help="Configuration file")
+    parser.add_argument("--seed", type=int, help="RNG seed (overrides config)")
+    parser.add_argument("--agent", help="Algorithm variant: 'wmar' (augmented replay) or 'dv3' (FIFO-only)")
+    
     args = parser.parse_args()
     if args.config is not None:
         config = Config.from_file(Path(args.config))
@@ -40,6 +46,8 @@ if __name__ == "__main__":
                 EnvConfig("CoinRun+NB"),
                 EnvConfig("CoinRun+NB+RT"),
                 EnvConfig("CoinRun+NB+RT+MA"),
+                EnvConfig("CoinRun+NB+RT+MA+UGA"),
+                EnvConfig("CoinRun+NB+RT+MA+UGA+CA"),
             ],
             kwargs={"swap_sched": 90},
         ),
@@ -72,15 +80,31 @@ if __name__ == "__main__":
         wall_time_optimisation=False,
         action_space=15,
         replay_buffers=[
-            RbConfig(replay.FifoReplay, "cuda"),
-            RbConfig(replay.LongTermReplay, "cuda"),
+            RbConfig(replay.FifoReplay, "cuda"),#default is for dv3
         ],
     )
+     # ---------------------------------------------------------------------
+    # Override replay buffer choice based on --agent -----------------------
+    # ---------------------------------------------------------------------
+
     config = config if config is not None else default_config
 
+    if args.seed is not None:
+            config.seed = args.seed
+    
+    running = "dv3"
+    if args.agent.lower() != "dv3":
+        running = "WMAR"
+        config.replay_buffers.append(RbConfig(replay.LongTermReplay, "cuda")) #for WMAR
+
+    print("replay_buffers:")
+    print(len(config.replay_buffers))
+    print(config.replay_buffers)
+
+    
     torch.random.manual_seed(config.seed)
     np.random.seed(config.seed)
-
+    print("Training with seed: ", config.seed)
     wm = WorldModel(
         3,
         (32, 32),
@@ -100,20 +124,31 @@ if __name__ == "__main__":
     aco: Optional[ActorCriticOpt] = None
 
     if not log_dir:
-        # This is how tensorboard names the folder
-        import os
-        import socket
-        from datetime import datetime
 
         current_time = datetime.now().strftime("%b%d_%H-%M-%S")
-        log_dir = os.path.join("runs", current_time + "_" + socket.gethostname())
+        run_name = f"{current_time}_{socket.gethostname()}_seed{config.seed}"
+        # put files in runs/<running>/<run_name>/
+        log_dir  = os.path.join("runs", running, run_name)      
+
+
     writer = SummaryWriter(log_dir=log_dir)
     log_dir = Path(log_dir)
     config.save(log_dir / "config.json")
 
+    # -------------------------------------------------------------------------
+    # NEW METRIC STATE: sample‑efficiency bookkeeping
+    # -------------------------------------------------------------------------
+    total_env_steps = 0        # number of *real* environment interactions so far
+    # (training iterations == global_step; declared later)
+
     best_rews_mean = float("-inf")
-    global_step = 0
+    global_step = 0            # gradient updates so far  ≙  training iterations
+    runs_root = Path("runs") / running          # running == "WMAR" or "DV3'"
+    runs_root.mkdir(parents=True, exist_ok=True)
+    epoch_file = runs_root / "current_epoch.txt"
+
     for epoch in range(config.epochs):
+
         if config.random_policy == "first":
             random_policy = epoch == 0
         elif config.random_policy == "new":
@@ -134,6 +169,17 @@ if __name__ == "__main__":
                 config.data_n,
             )
             replay.add(_acts, _obss, _rews, _conts, _resets)
+
+            # -----------------------------------------------------------------
+            # *Sample‑efficiency metric 1*: real env experiences gathered so far
+            # Each tuple (t, n) counts as one env step; multiply by env_repeat.
+            # -----------------------------------------------------------------
+            num_new_env_steps = _acts.shape[0] * _acts.shape[1] * config.env_repeat
+            total_env_steps += num_new_env_steps
+            writer.add_scalar("Sample/total_env_steps", total_env_steps, global_step)
+            # Also expose current replay size – handy to visualise replay reuse
+            writer.add_scalar("Sample/replay_buffer_size", replay.n_valid, global_step)
+
         envs.step()
         print(f"{replay.n_valid=}")
 
@@ -200,6 +246,12 @@ if __name__ == "__main__":
             grad_norm = torch.nn.utils.clip_grad_norm_(wm.parameters(), 1000)
             opt.step()
 
+            # -------------------------------------------------------------
+            # *Sample‑efficiency metric 2*: number of training iterations
+            # (we simply mirror global_step so it appears explicitly)
+            # -------------------------------------------------------------
+            writer.add_scalar("Sample/total_train_iters", global_step, global_step)
+
             # Optional progress bar logging
             # if global_step % 10 == 0:
             #     progbar.set_postfix({k: f"{v:.2f}" for k, v in metrics.items()})
@@ -239,7 +291,7 @@ if __name__ == "__main__":
                             z.swapaxes(0, 1).flatten(0, 1).unsqueeze(1),
                             global_step,
                         )
-            global_step += 1
+            global_step += 1  # ----------------------------------  training‑iteration counter
 
         if config.fresh_ac and epoch % config.fresh_ac == 0:
             aco, approx_perf = train_ac_from_wm(
@@ -266,3 +318,6 @@ if __name__ == "__main__":
         if save_nets:
             torch.save(wm.state_dict(), log_dir / "save_wm.pt")
             torch.save(aco.ac.state_dict(), log_dir / "save_ac.pt")
+        
+        torch.cuda.empty_cache()
+

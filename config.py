@@ -48,11 +48,17 @@ class EnvConfig(Serialisable):
             "use_backgrounds": True,
             "restrict_themes": False,
             "use_monochrome_assets": False,
+            "use_generated_assets": False,   # Procgen option
+            "center_agent": True,            # Procgen option
+
         }
         mods = {
             "NB": {"use_backgrounds": False},
             "RT": {"restrict_themes": True},
-            "MA": {"use_monochrome_assets": True}
+            "MA": {"use_monochrome_assets": True},
+            "UGA": {"use_generated_assets": True},   # “use-generated-assets”
+            "CA":  {"center_agent": False}        # “center-agent = False”
+
         }
         parts = self.name.split("+")
         assert parts[0] == "CoinRun"
@@ -186,3 +192,4 @@ class Config(Serialisable):
             )
         rc = self.replay_buffers[0]
         return rc.rb_type(self.data_t, self.data_n_max, self.action_space, rc.rb_device)
+

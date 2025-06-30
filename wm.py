@@ -149,3 +149,4 @@ class ZhToModelState(nn.Module):
         if self.linear:
             return self.linear(zh)
         return zh
+

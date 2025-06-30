@@ -151,3 +151,4 @@ class ChLayerNorm(nn.Module):
         x = self.norm(x)
         # [ N H W C ] -> [ N C H W ]
         return x.permute(0, 3, 1, 2)
+

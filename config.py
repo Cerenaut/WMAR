@@ -117,6 +117,15 @@ class RbConfig(Serialisable):
 @dataclass
 class Config(Serialisable):
     esc: EnvScheduleConfig
+    algorithm: Literal["dv3", "wmar", "sac"] = "dv3"
+    # SAC hyper-parameters…
+    sac_lr: float = 3e-4
+    sac_batch_size: int = 256
+    sac_replay_buffer_size: int = 2**19 # to match total memory for WMAR
+    sac_tau: float = 0.005
+    sac_gamma: float = 0.99
+    sac_alpha: float = 0.2
+    img_size: int = 64
 
     seed: int = 1337
 
@@ -192,4 +201,3 @@ class Config(Serialisable):
             )
         rc = self.replay_buffers[0]
         return rc.rb_type(self.data_t, self.data_n_max, self.action_space, rc.rb_device)
-

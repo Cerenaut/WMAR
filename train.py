@@ -54,7 +54,7 @@ if __name__ == "__main__":
             kwargs={"swap_sched": 90},
         ),
         seed=1337,
-        epochs=2,
+        epochs=361,
         wm_lr=1e-4,
         log_frequency=1000,
         steps_per_batch=1000,

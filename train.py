@@ -1,7 +1,6 @@
 import argparse
 from pathlib import Path
 from typing import Optional
-# This is how tensorboard names the folder
 import os
 import socket
 from datetime import datetime
@@ -26,7 +25,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", help="Configuration file")
     parser.add_argument("--seed", type=int, help="RNG seed (overrides config)")
-    parser.add_argument("--agent", help="Algorithm variant: 'wmar' (augmented replay) or 'dv3' (FIFO-only)")
+    parser.add_argument(
+        "--agent",
+        choices=["dv3", "wmar", "sac"],
+        default="dv3",
+        help="Algorithm: 'dv3' (FIFO), 'wmar' (augmented replay), or 'sac' (Soft-Actor-Critic)")    
     
     args = parser.parse_args()
     if args.config is not None:
@@ -52,7 +55,7 @@ if __name__ == "__main__":
             kwargs={"swap_sched": 90},
         ),
         seed=1337,
-        epochs=361,
+        epochs=2,
         wm_lr=1e-4,
         log_frequency=1000,
         steps_per_batch=1000,
@@ -83,7 +86,7 @@ if __name__ == "__main__":
             RbConfig(replay.FifoReplay, "cuda"),#default is for dv3
         ],
     )
-     # ---------------------------------------------------------------------
+    # ---------------------------------------------------------------------
     # Override replay buffer choice based on --agent -----------------------
     # ---------------------------------------------------------------------
 
@@ -92,10 +95,20 @@ if __name__ == "__main__":
     if args.seed is not None:
             config.seed = args.seed
     
-    running = "dv3"
-    if args.agent.lower() != "dv3":
-        running = "WMAR"
-        config.replay_buffers.append(RbConfig(replay.LongTermReplay, "cuda")) #for WMAR
+    # select algorithm
+    agent = args.agent.lower()
+    if agent == "sac":
+        # dispatch into sac.py, skip all WMAR/DV3 setup
+        import sac
+        config.algorithm = "sac"
+        sac.train_sac(config)
+        exit(0)
+
+    # otherwise set up WMAR/DV3 buffers as before
+    running = "dv3" #default
+    if agent == "wmar":
+        running = "wmar"
+        config.replay_buffers.append(RbConfig(replay.LongTermReplay, "cuda")) # add LT
 
     print("replay_buffers:")
     print(len(config.replay_buffers))
@@ -135,14 +148,11 @@ if __name__ == "__main__":
     log_dir = Path(log_dir)
     config.save(log_dir / "config.json")
 
-    # -------------------------------------------------------------------------
-    # NEW METRIC STATE: sample‑efficiency bookkeeping
-    # -------------------------------------------------------------------------
+    
     total_env_steps = 0        # number of *real* environment interactions so far
-    # (training iterations == global_step; declared later)
 
     best_rews_mean = float("-inf")
-    global_step = 0            # gradient updates so far  ≙  training iterations
+    global_step = 0            # gradient updates so far  training iterations
     runs_root = Path("runs") / running          # running == "WMAR" or "DV3'"
     runs_root.mkdir(parents=True, exist_ok=True)
     epoch_file = runs_root / "current_epoch.txt"
@@ -170,10 +180,8 @@ if __name__ == "__main__":
             )
             replay.add(_acts, _obss, _rews, _conts, _resets)
 
-            # -----------------------------------------------------------------
-            # *Sample‑efficiency metric 1*: real env experiences gathered so far
             # Each tuple (t, n) counts as one env step; multiply by env_repeat.
-            # -----------------------------------------------------------------
+
             num_new_env_steps = _acts.shape[0] * _acts.shape[1] * config.env_repeat
             total_env_steps += num_new_env_steps
             writer.add_scalar("Sample/total_env_steps", total_env_steps, global_step)
@@ -246,15 +254,8 @@ if __name__ == "__main__":
             grad_norm = torch.nn.utils.clip_grad_norm_(wm.parameters(), 1000)
             opt.step()
 
-            # -------------------------------------------------------------
-            # *Sample‑efficiency metric 2*: number of training iterations
-            # (we simply mirror global_step so it appears explicitly)
-            # -------------------------------------------------------------
             writer.add_scalar("Sample/total_train_iters", global_step, global_step)
 
-            # Optional progress bar logging
-            # if global_step % 10 == 0:
-            #     progbar.set_postfix({k: f"{v:.2f}" for k, v in metrics.items()})
 
             if global_step % config.log_frequency == 0:
                 writer.add_scalar("Metric/grad_norm", grad_norm, global_step)
@@ -291,7 +292,7 @@ if __name__ == "__main__":
                             z.swapaxes(0, 1).flatten(0, 1).unsqueeze(1),
                             global_step,
                         )
-            global_step += 1  # ----------------------------------  training‑iteration counter
+            global_step += 1  # training‑iteration counter
 
         if config.fresh_ac and epoch % config.fresh_ac == 0:
             aco, approx_perf = train_ac_from_wm(

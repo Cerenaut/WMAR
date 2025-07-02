@@ -24,7 +24,7 @@ from generate_trajectory import (
 )
 
 # ---------------------------------------------------------
-# NETWORK DEFINITIONS (WMAR encoder + MLP widths)
+# 1) NETWORK DEFINITIONS (WMAR encoder + MLP widths)
 # ---------------------------------------------------------
 class QNetwork(nn.Module):
     def __init__(self, in_channels: int, action_dim: int, config: Config):
@@ -86,7 +86,7 @@ class GaussianPolicy(nn.Module):
 
 
 # ---------------------------------------------------------
-# SAC TRAINING LOOP 
+# 2) SAC TRAINING LOOP (with WMAR‐style logging & progress)
 # ---------------------------------------------------------
 def train_sac(config: Config):
     torch.manual_seed(config.seed)
@@ -142,6 +142,7 @@ def train_sac(config: Config):
         )
         replay_buffer.add(acts, obss, rews, conts, resets)
         schedule.step()
+        print(f"[Epoch {epoch+1:4d}] Replay‐buffer size (transitions): {replay_buffer.n_valid}")
 
         # SAMPLE METRICS
         total_env_steps += acts.shape[0] * acts.shape[1] * config.env_repeat

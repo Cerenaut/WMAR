@@ -48,16 +48,16 @@ class EnvConfig(Serialisable):
             "use_backgrounds": True,
             "restrict_themes": False,
             "use_monochrome_assets": False,
-            "use_generated_assets": False,   
-            "center_agent": True,
+            "use_generated_assets": False,   # Procgen option
+            "center_agent": True,            # Procgen option
 
         }
         mods = {
             "NB": {"use_backgrounds": False},
             "RT": {"restrict_themes": True},
             "MA": {"use_monochrome_assets": True},
-            "UGA": {"use_generated_assets": True},  
-            "CA":  {"center_agent": False}        
+            "UGA": {"use_generated_assets": True},   # “use-generated-assets”
+            "CA":  {"center_agent": False}        # “center-agent = False”
 
         }
         parts = self.name.split("+")
@@ -121,7 +121,7 @@ class Config(Serialisable):
     # SAC hyper-parameters…
     sac_lr: float = 3e-4
     sac_batch_size: int = 256
-    sac_replay_buffer_size: int = 2**19 # to match total memory for WMAR
+    sac_dv3_data_n_max: int = 1024 # to match total memory for WMAR
     sac_tau: float = 0.005
     sac_gamma: float = 0.99
     sac_alpha: float = 0.2
@@ -192,12 +192,14 @@ class Config(Serialisable):
         )
 
     def get_replay_buffer(self) -> Replay:
-        if len(self.replay_buffers) > 1:
+        if self.algorithm == "wmar":
             return MultiTypeReplay(
                 *[
                     rc.rb_type(self.data_t, self.data_n_max, self.action_space, rc.rb_device)
                     for rc in self.replay_buffers
                 ]
             )
-        rc = self.replay_buffers[0]
-        return rc.rb_type(self.data_t, self.data_n_max, self.action_space, rc.rb_device)
+        if self.algorithm == "dv3" or self.algorithm == "sac":
+            rc = self.replay_buffers[0]
+            return rc.rb_type(self.data_t, self.sac_dv3_data_n_max, self.action_space, rc.rb_device)
+        #self.sac_dv3_data_n_max

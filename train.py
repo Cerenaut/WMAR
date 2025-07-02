@@ -9,6 +9,7 @@ import torch
 from torch.optim import Adam
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
+
 import replay
 from ac import ActorCriticOpt, train_ac_from_wm
 from config import Config, EnvConfig, EnvScheduleConfig, RbConfig
@@ -92,11 +93,16 @@ if __name__ == "__main__":
     config = config if config is not None else default_config
 
     if args.seed is not None:
-            config.seed = args.seed
-    
+        config.seed = args.seed
+
+    agent = ""
+    running = "" 
+
     # select algorithm
-    agent = args.agent.lower()
-    if agent == "sac":
+    if args.agent is None or args.agent.lower() == "dv3" :
+        running = "dv3" #default 
+
+    elif args.agent.lower() == "sac":
         # dispatch into sac.py, skip all WMAR/DV3 setup
         import sac
         config.algorithm = "sac"
@@ -104,11 +110,13 @@ if __name__ == "__main__":
         exit(0)
 
     # otherwise set up WMAR/DV3 buffers as before
-    running = "dv3" #default
-    if agent == "wmar":
+    elif args.agent.lower() == "wmar":
         running = "wmar"
         config.replay_buffers.append(RbConfig(replay.LongTermReplay, "cuda")) # add LT
+    else:
+        raise ValueError("Unknown agent; choose from 'dv3','wmar','sac'")
 
+    print("Agent is ",running)
     print("replay_buffers:")
     print(len(config.replay_buffers))
     print(config.replay_buffers)
@@ -154,7 +162,6 @@ if __name__ == "__main__":
     global_step = 0            # gradient updates so far  training iterations
     runs_root = Path("runs") / running          # running == "WMAR" or "DV3'"
     runs_root.mkdir(parents=True, exist_ok=True)
-    epoch_file = runs_root / "current_epoch.txt"
 
     for epoch in range(config.epochs):
 
@@ -203,6 +210,7 @@ if __name__ == "__main__":
 
         # Evaluation games
         if epoch % 10 == 0:
+            print("Evaluation started ...")
             eval_results_mean = []
             eval_results_std = []
             eval_funcs = envs.eval_funcs()

@@ -86,10 +86,8 @@ if __name__ == "__main__":
             RbConfig(replay.FifoReplay, "cuda"),#default is for dv3
         ],
     )
-    # ---------------------------------------------------------------------
-    # Override replay buffer choice based on --agent -----------------------
-    # ---------------------------------------------------------------------
-
+    # Override replay buffer choice based on --agent 
+    
     config = config if config is not None else default_config
 
     if args.seed is not None:
@@ -115,11 +113,6 @@ if __name__ == "__main__":
         config.replay_buffers.append(RbConfig(replay.LongTermReplay, "cuda")) # add LT
     else:
         raise ValueError("Unknown agent; choose from 'dv3','wmar','sac'")
-
-    print("Agent is ",running)
-    print("replay_buffers:")
-    print(len(config.replay_buffers))
-    print(config.replay_buffers)
 
     
     torch.random.manual_seed(config.seed)

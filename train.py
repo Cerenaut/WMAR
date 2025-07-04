@@ -24,12 +24,9 @@ from wm import WorldModel
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", help="Configuration file")
-    parser.add_argument("--seed", type=int, help="RNG seed (overrides config)")
-    parser.add_argument(
-        "--agent",
-        choices=["dv3", "wmar", "sac"],
-        default="dv3",
-        help="Algorithm: 'dv3' (FIFO), 'wmar' (augmented replay), or 'sac' (Soft-Actor-Critic)")    
+    save_nets = False
+    log_dir = None
+    log_images = False
     
     args = parser.parse_args()
     if args.config is not None:
@@ -37,83 +34,11 @@ if __name__ == "__main__":
     else:
         config = None
 
-    save_nets = False
-    log_dir = None
-    log_images = False
-
-    default_config = Config(
-        esc=EnvScheduleConfig(
-            env_schedule_type=SequentialEnvironments,
-            env_configs=[
-                EnvConfig("CoinRun"),
-                EnvConfig("CoinRun+NB"),
-                EnvConfig("CoinRun+NB+RT"),
-                EnvConfig("CoinRun+NB+RT+MA"),
-                EnvConfig("CoinRun+NB+RT+MA+UGA"),
-                EnvConfig("CoinRun+NB+RT+MA+UGA+CA"),
-            ],
-            kwargs={"swap_sched": 90},
-        ),
-        seed=1337,
-        epochs=361,
-        wm_lr=1e-4,
-        log_frequency=1000,
-        steps_per_batch=1000,
-        ac_train_steps=800,
-        ac_train_sync=128,
-        fresh_ac=False,
-        n_sync=4,
-        gen_seq_len=4096,
-        env_repeat=1,
-        data_n=32,
-        data_n_max=512,
-        data_t=512,
-        mb_t_size=32,
-        mb_n_size=16,
-        random_policy="first",
-        pretrain_enabled=False,
-        pretrain_data_multiplier=4,
-        pretrain_mb_t_size=8,
-        pretrain_mb_n_size=16,
-        pretrain_steps=30_000,
-        gru_units=512,
-        cnn_depth=32,
-        mlp_features=512,
-        mlp_layers=2,
-        wall_time_optimisation=False,
-        action_space=15,
-        replay_buffers=[
-            RbConfig(replay.FifoReplay, "cuda"),#default is for dv3
-        ],
-    )
-    # Override replay buffer choice based on --agent 
-    
-    config = config if config is not None else default_config
-
-    if args.seed is not None:
-        config.seed = args.seed
-
-    agent = ""
-    running = "" 
-
-    # select algorithm
-    if args.agent is None or args.agent.lower() == "dv3" :
-        running = "dv3" #default 
-
-    elif args.agent.lower() == "sac":
+    if config.algorithm == "sac":
         # dispatch into sac.py, skip all WMAR/DV3 setup
         import sac
-        config.algorithm = "sac"
         sac.train_sac(config)
         exit(0)
-
-    # otherwise set up WMAR/DV3 buffers as before
-    elif args.agent.lower() == "wmar":
-        running = "wmar"
-        config.replay_buffers.append(RbConfig(replay.LongTermReplay, "cuda")) # add LT
-    else:
-        raise ValueError("Unknown agent; choose from 'dv3','wmar','sac'")
-
     
     torch.random.manual_seed(config.seed)
     np.random.seed(config.seed)
@@ -131,7 +56,7 @@ if __name__ == "__main__":
     opt = Adam(wm.parameters(), lr=config.wm_lr)
 
     envs = config.get_env_schedule()
-    replay = config.get_replay_buffer()
+    replay = config.get_replay_buffer()    
 
     # OPTIONAL: Load from existing
     aco: Optional[ActorCriticOpt] = None
@@ -140,8 +65,7 @@ if __name__ == "__main__":
 
         current_time = datetime.now().strftime("%b%d_%H-%M-%S")
         run_name = f"{current_time}_{socket.gethostname()}_seed{config.seed}"
-        # put files in runs/<running>/<run_name>/
-        log_dir  = os.path.join("runs", running, run_name)      
+        log_dir  = os.path.join("runs", config.algorithm, run_name)      
 
 
     writer = SummaryWriter(log_dir=log_dir)
@@ -153,7 +77,7 @@ if __name__ == "__main__":
 
     best_rews_mean = float("-inf")
     global_step = 0            # gradient updates so far  training iterations
-    runs_root = Path("runs") / running          # running == "WMAR" or "DV3'"
+    runs_root = Path("runs") / config.algorithm  
     runs_root.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(config.epochs):

@@ -35,16 +35,9 @@ And includes:
 
 ## Running an Algorithm
 
-All runs use the same `train.py` script. Choose the algorithm with `--agent`, optionally a config file with `--config`, and/or the RNG seed with `--seed`. You can combine any of these options. For example:
+All runs use the same `train.py` script. You must use a config file with `--config`. For example:
 
 ```bash
-# To run WMAR with seed 1337:
-python train.py --agent wmar --seed 1337
-
-# To run DV3' with seed 1338:
-python train.py --agent dv3 --seed 1338
-
-# To run SAC with seed 1339:
-python train.py --agent sac --seed 1339
+python train.py --config "config.json"
 ```
 

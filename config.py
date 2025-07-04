@@ -48,17 +48,11 @@ class EnvConfig(Serialisable):
             "use_backgrounds": True,
             "restrict_themes": False,
             "use_monochrome_assets": False,
-            "use_generated_assets": False,   # Procgen option
-            "center_agent": True,            # Procgen option
-
         }
         mods = {
             "NB": {"use_backgrounds": False},
             "RT": {"restrict_themes": True},
-            "MA": {"use_monochrome_assets": True},
-            "UGA": {"use_generated_assets": True},   # “use-generated-assets”
-            "CA":  {"center_agent": False}        # “center-agent = False”
-
+            "MA": {"use_monochrome_assets": True}
         }
         parts = self.name.split("+")
         assert parts[0] == "CoinRun"
@@ -117,15 +111,6 @@ class RbConfig(Serialisable):
 @dataclass
 class Config(Serialisable):
     esc: EnvScheduleConfig
-    algorithm: Literal["dv3", "wmar", "sac"] = "dv3"
-    # SAC hyper-parameters…
-    sac_lr: float = 3e-4
-    sac_batch_size: int = 256
-    sac_dv3_data_n_max: int = 1024 # to match total memory for WMAR
-    sac_tau: float = 0.005
-    sac_gamma: float = 0.99
-    sac_alpha: float = 0.2
-    img_size: int = 64
 
     seed: int = 1337
 
@@ -192,13 +177,12 @@ class Config(Serialisable):
         )
 
     def get_replay_buffer(self) -> Replay:
-        if self.algorithm == "wmar":
+        if len(self.replay_buffers) > 1:
             return MultiTypeReplay(
                 *[
                     rc.rb_type(self.data_t, self.data_n_max, self.action_space, rc.rb_device)
                     for rc in self.replay_buffers
                 ]
             )
-        if self.algorithm == "dv3" or self.algorithm == "sac":
-            rc = self.replay_buffers[0]
-            return rc.rb_type(self.data_t, self.sac_dv3_data_n_max, self.action_space, rc.rb_device)
+        rc = self.replay_buffers[0]
+        return rc.rb_type(self.data_t, self.data_n_max, self.action_space, rc.rb_device)

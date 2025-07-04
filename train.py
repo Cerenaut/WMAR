@@ -1,3 +1,5 @@
+import time
+from datetime import datetime
 import argparse
 from pathlib import Path
 from typing import Optional
@@ -22,6 +24,9 @@ from generate_trajectory import (
 from wm import WorldModel
 
 if __name__ == "__main__":
+    start_time = datetime.now()
+    print(f"Training started at {start_time.isoformat()}")
+    
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", help="Configuration file")
     save_nets = False
@@ -243,6 +248,24 @@ if __name__ == "__main__":
         if save_nets:
             torch.save(wm.state_dict(), log_dir / "save_wm.pt")
             torch.save(aco.ac.state_dict(), log_dir / "save_ac.pt")
+        
+        end_time = datetime.now()
+        print(f"Training ended   at {end_time.isoformat()}")
+    
+        # Compute duration
+        duration = end_time - start_time
+    
+        # Append to log file
+        log_line = (
+            f"Start:    {start_time.isoformat()}\n"
+            f"End:      {end_time.isoformat()}\n"
+            f"Duration: {duration}\n"
+            f"Num of epochs: {config.epochs}\n"
+            "----------------------------------------\n"
+        )
+        with open("training_times.txt", "a") as log_file:
+            log_file.write(log_line)
+        
         
         torch.cuda.empty_cache()
 

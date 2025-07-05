@@ -1,0 +1,86 @@
+{
+    "esc": {
+        "env_schedule_type": "SequentialEnvironments",
+        "env_configs": [
+            {
+                "name": "ALE/MsPacman-v5",
+                "kwargs": {},
+                "rew_scale": 0.05
+            },
+            {
+                "name": "ALE/Boxing-v5",
+                "kwargs": {},
+                "rew_scale": 1
+            },
+            {
+                "name": "ALE/CrazyClimber-v5",
+                "kwargs": {},
+                "rew_scale": 0.001
+            },
+            {
+                "name": "ALE/Frostbite-v5",
+                "kwargs": {},
+                "rew_scale": 0.2
+            },
+            {
+                "name": "ALE/Seaquest-v5",
+                "kwargs": {},
+                "rew_scale": 0.5
+            },
+            {
+                "name": "ALE/Enduro-v5",
+                "kwargs": {},
+                "rew_scale": 0.5
+            }
+        ],
+        "kwargs": {
+            "swap_sched": 90
+        }
+    },
+    "algorithm": "wmar",
+    "sac_lr": 0.0003,
+    "sac_batch_size": 256,
+    "sac_dv3_data_n_max": 1024,
+    "sac_tau": 0.005,
+    "sac_gamma": 0.99,
+    "sac_alpha": 0.2,
+    "img_size": 64,
+    "seed": 1337,
+    "epochs": 361,
+    "wm_lr": 0.0001,
+    "log_frequency": 1000,
+    "steps_per_batch": 1000,
+    "ac_train_steps": 800,
+    "ac_train_sync": 128,
+    "fresh_ac": false,
+    "n_sync": 4,
+    "gen_seq_len": 4096,
+    "env_repeat": 4,
+    "data_n": 32,
+    "data_n_max": 512,
+    "data_t": 512,
+    "mb_t_size": 32,
+    "mb_n_size": 16,
+    "random_policy": "first",
+    "pretrain_enabled": false,
+    "pretrain_data_multiplier": 4,
+    "pretrain_mb_t_size": 8,
+    "pretrain_mb_n_size": 16,
+    "pretrain_steps": 30000,
+    "gru_units": 512,
+    "cnn_depth": 32,
+    "mlp_features": 512,
+    "mlp_layers": 2,
+    "wall_time_optimisation": false,
+    "action_space": 18,
+    "replay_buffers": [
+        {
+            "rb_type": "FifoReplay",
+            "rb_device": "cuda"
+        },
+        {
+            "rb_type": "LongTermReplay",
+            "rb_device": "cuda"
+        }
+    ]
+}

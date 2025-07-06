@@ -1,9 +1,16 @@
-gymnasium==0.26.2
-numpy==1.24.3
-torch==1.12.1
-torchvision==0.13.1
-opencv-python==4.7.0.72
-matplotlib==3.7.1
-tqdm
-sortedcontainers
-tensorboard
+--extra-index-url https://download.pytorch.org/whl/cu118
+procgen
+gymnasium==1.1.1
+ale-py==0.11.1
+autorom[accept-rom-license]==0.6.1
+
+numpy==1.26.4
+torch==2.2.2+cu118
+torchvision==0.17.2+cu118
+torchaudio==2.2.2+cu118
+
+opencv-python==4.11.0.86
+matplotlib==3.10.0
+tqdm==4.67.1
+sortedcontainers==2.4.0
+tensorboard==2.19.0

@@ -117,7 +117,7 @@ if __name__ == "__main__":
             writer.add_scalar("Sample/replay_buffer_size", replay.n_valid, global_step)
 
         envs.step()
-        print(f"{replay.n_valid=}")
+        #print(f"{replay.n_valid=}")
 
         rews_eps_mean = _rews.sum().item() / _resets.sum().item()
         writer.add_scalar("Perf/rews_eps_mean", rews_eps_mean, global_step)
@@ -132,6 +132,7 @@ if __name__ == "__main__":
 
         # Evaluation games
         if epoch % 10 == 0:
+            print(f"Epoch: {epoch}/{config.epochs} ...")
             print("Evaluation started ...")
             eval_results_mean = []
             eval_results_std = []
@@ -165,6 +166,7 @@ if __name__ == "__main__":
             if epoch > 0 or not config.pretrain_enabled
             else config.pretrain_steps,
             desc=f"Epoch {epoch + 1}/{config.epochs}",
+            disable=True,
         )
         for _ in progbar:
             if epoch > 0 or not config.pretrain_enabled:

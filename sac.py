@@ -159,8 +159,8 @@ def train_sac(config: Config):
         Q1_loss_val = Q2_loss_val = policy_loss_val = None
 
         # SAC UPDATES
-        sac_bar = trange(config.ac_train_steps, desc="Train SAC", leave=False)
-        for _ in sac_bar:
+
+        for _ in range(config.ac_train_steps):
             if replay_buffer.n_valid < config.sac_batch_size:
                 continue
             mb_acts, mb_obs, mb_rews, mb_conts, mb_resets = replay_buffer.minibatch(
@@ -202,7 +202,6 @@ def train_sac(config: Config):
             Q1_loss_val     = q1_loss.item()
             Q2_loss_val     = q2_loss.item()
             policy_loss_val = policy_loss.item()
-            sac_bar.set_postfix({"Q1": f"{Q1_loss_val:.3f}", "Q2": f"{Q2_loss_val:.3f}", "π-loss": f"{policy_loss_val:.3f}"})
 
         # METRIC LOGS
         grad_norm = torch.nn.utils.clip_grad_norm_(q1.parameters(), 1000)
@@ -214,6 +213,7 @@ def train_sac(config: Config):
 
         # EVALUATION
         if epoch % 10 == 0:
+            print(f"Epoch: {epoch}/{config.epochs} ...")
             print("Evaluation started...")
             eval_means, eval_stds = [], []
             for efns in schedule.eval_funcs():
@@ -236,7 +236,6 @@ def train_sac(config: Config):
                 torch.save(policy.state_dict(), log_dir / "save_sac_policy_best.pt")
                 torch.save(q1.state_dict(),      log_dir / "save_sac_q1_best.pt")
                 torch.save(q2.state_dict(),      log_dir / "save_sac_q2_best.pt")
-        print(f"Finished epoch {epoch+1}/{config.epochs}")
 
         global_step += 1
 

@@ -126,13 +126,11 @@ if __name__ == "__main__":
         if rews_eps_mean >= best_rews_mean:
             best_rews_mean = rews_eps_mean
             if save_nets and aco is not None:
-                print(f"Saving best rews eps mean {rews_eps_mean=}")
                 torch.save(wm.state_dict(), log_dir / "save_wm_best.pt")
                 torch.save(aco.ac.state_dict(), log_dir / "save_ac_best.pt")
 
         # Evaluation games
         if epoch % 10 == 0:
-            print("Evaluation started ...")
             eval_results_mean = []
             eval_results_std = []
             eval_funcs = envs.eval_funcs()
@@ -165,6 +163,8 @@ if __name__ == "__main__":
             if epoch > 0 or not config.pretrain_enabled
             else config.pretrain_steps,
             desc=f"Epoch {epoch + 1}/{config.epochs}",
+            disable = True,
+
         )
         for _ in progbar:
             if epoch > 0 or not config.pretrain_enabled:

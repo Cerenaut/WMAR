@@ -198,7 +198,7 @@ def generate_trajectories(
         post = " (+WM/AC)"
     else:
         post = ""
-    with tqdm(total=n, desc=f"Generating trajectories{post}") as progbar:
+    with tqdm(total=n, desc=f"Generating trajectories{post}",disable = True) as progbar:
         while n_samples < n:
             _n_samples = n_samples
             if target_terminals is not None and n_terminals >= target_terminals:

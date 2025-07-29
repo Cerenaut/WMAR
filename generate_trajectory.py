@@ -1,4 +1,4 @@
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, List
 
 import cv2
 import gym
@@ -10,10 +10,11 @@ from tqdm import tqdm
 from ac import ActorCritic, zh_to_ac_state
 from rssm import ActionT, ContT, ImageT, ResetT
 from wm import RewardT, WorldModel
+from typing import Tuple
 
 
 class EnvironmentSchedule:
-    def __init__(self, n_sync: int, templates: list[Callable[[], Any]]) -> None:
+    def __init__(self, n_sync: int, templates: List[Callable[[], Any]]) -> None:
         self._step = 0
         self.templates = templates
         self.n_sync = n_sync
@@ -21,10 +22,10 @@ class EnvironmentSchedule:
     def step(self) -> None:
         self._step += 1
 
-    def funcs(self) -> list[Callable[[], Any]]:
+    def funcs(self) -> List[Callable[[], Any]]:
         raise NotImplementedError
 
-    def eval_funcs(self) -> list[list[Callable[[], Any]]]:
+    def eval_funcs(self) -> List[List[Callable[[], Any]]]:
         return [[t for _ in range(self.n_sync)] for t in self.templates]
 
     def is_new_env(self) -> bool:
@@ -32,10 +33,10 @@ class EnvironmentSchedule:
 
 
 class AllEnvironments(EnvironmentSchedule):
-    def __init__(self, n_sync: int, templates: list[Callable[[], Any]]) -> None:
+    def __init__(self, n_sync: int, templates: List[Callable[[], Any]]) -> None:
         super().__init__(n_sync, templates)
 
-    def funcs(self) -> list[Callable[[], Any]]:
+    def funcs(self) -> List[Callable[[], Any]]:
         res = []
         for _ in range(self.n_sync):
             res.append(np.random.choice(self.templates))
@@ -46,11 +47,11 @@ class AllEnvironments(EnvironmentSchedule):
 
 
 class SequentialEnvironments(EnvironmentSchedule):
-    def __init__(self, n_sync: int, templates: list[Callable[[], Any]], swap_sched: int) -> None:
+    def __init__(self, n_sync: int, templates: List[Callable[[], Any]], swap_sched: int) -> None:
         super().__init__(n_sync, templates)
         self.swap_sched = swap_sched
 
-    def funcs(self) -> list[Callable[[], Any]]:
+    def funcs(self) -> List[Callable[[], Any]]:
         i = (self._step // self.swap_sched) % len(self.templates)
         return [self.templates[i] for _ in range(self.n_sync)]
 
@@ -109,10 +110,10 @@ def evaluate(
     n_sync: int,
     wm: Optional[WorldModel] = None,
     ac: Optional[ActorCritic] = None,
-    env_fns: Optional[list[Callable[[], Any]]] = None,
+    env_fns: Optional[List[Callable[[], Any]]] = None,
     env_repeat: int = 4,
     n_rollouts: int = 10,
-) -> tuple[float, float]:
+) -> Tuple[float, float]:
     _, _, rews, conts, resets = generate_trajectories(
         n_rollouts * 2**13 // n_sync,
         n_sync,
@@ -146,18 +147,18 @@ def generate_trajectories(
     n_sync: int,
     wm: Optional[WorldModel] = None,
     ac: Optional[ActorCritic] = None,
-    env_fns: Optional[list[Callable[[], Any]]] = None,
+    env_fns: Optional[List[Callable[[], Any]]] = None,
     env_repeat: int = 1,
     target_terminals: Optional[int] = None,
     no_images: bool = False,
-) -> tuple[ActionT, ImageT, RewardT, ContT, ResetT]:
+) -> Tuple[ActionT, ImageT, RewardT, ContT, ResetT]:
     assert env_repeat == 1
     # Returns [ X ... ] packed as [ N*T ... ] (sort of)
     # To change to [ T N ... ], do reshape and swapaxes
     # `target_terminals` if not None, forces at least some number of environment resets
     # (not including initial resets)
 
-    class DummyList(list):
+    class DummyList(List):
         def append(self, __object: Any) -> None:
             return
 
@@ -188,7 +189,7 @@ def generate_trajectories(
         post = " (+WM/AC)"
     else:
         post = ""
-    with tqdm(total=n, desc=f"Generating trajectories{post}") as progbar:
+    with tqdm(total=n, desc=f"Generating trajectories{post}", disable=True) as progbar:
         while n_samples < n:
             _n_samples = n_samples
             if target_terminals is not None and n_terminals >= target_terminals:
@@ -263,11 +264,11 @@ def generate_trajectories(
         torch.from_numpy(np.concatenate(conts)[:n]).float().unsqueeze(-1),
         torch.from_numpy(np.concatenate(resets)[:n]).float().unsqueeze(-1),
     )
-
-
+# for dv3/wmar
+"""
 def reinterpret_nt_to_t_n(
     acts: ActionT, obss: ImageT, rews: RewardT, conts: ContT, resets: ResetT, t: int, n: int
-) -> tuple[ActionT, ImageT, RewardT, ContT, ResetT]:
+) -> Tuple[ActionT, ImageT, RewardT, ContT, ResetT]:
     if t * n != acts.shape[0]:
         raise ValueError(f"Illegal reinterpret (acts.shape={acts.shape}[0] != {t * n})")
     return (
@@ -277,3 +278,38 @@ def reinterpret_nt_to_t_n(
         conts.reshape(n, t, 1).swapaxes(0, 1),
         resets.reshape(n, t, 1).swapaxes(0, 1),
     )
+"""
+# for sac
+def reinterpret_nt_to_t_n(
+    acts,    # shape=(t*n, …)
+    obss,    # shape=(t*n, …)
+    rews,    # shape=(t*n, …)
+    conts,   # shape=(t*n, …)
+    resets,  # shape=(t*n, …)
+    t: int,
+    n: int
+):
+    if acts.shape[0] != t * n:
+        raise ValueError(
+            f"Illegal reinterpret (got {acts.shape[0]} rows; expected {t*n})"
+        )
+    # helper to reshape any array of shape (t*n, *D) → (t, n, *D)
+    def _reshape(x):
+        tail = x.shape[1:]                # capture any extra dims
+        return x.reshape((n, t) + tail)  \
+                .swapaxes(0, 1)           # now (t, n, *tail)
+
+    # 1) reshape everything
+    acts_tn  = _reshape(acts)
+    obss_tn  = _reshape(obss)
+    rews_tn  = _reshape(rews)
+    conts_tn = _reshape(conts)
+    res_tn   = _reshape(resets)
+
+    # 2) if your actions are one‑hot vectors, convert to indices:
+    #    detect by “has extra last dim > 1”
+    if acts_tn.ndim > 2:
+        # e.g. acts_tn.shape == (t, n, action_dim)
+        acts_tn = acts_tn.argmax(-1)   # now shape (t, n)
+
+    return acts_tn, obss_tn, rews_tn, conts_tn, res_tn

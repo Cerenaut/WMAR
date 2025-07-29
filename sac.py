@@ -1,4 +1,14 @@
-# sac.py
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    category=UserWarning,
+    module=r"gym\.utils\.passive_env_checker"
+)
+warnings.filterwarnings(
+    "ignore",
+    category=DeprecationWarning,
+    module=r"gym\.utils\.passive_env_checker"
+)
 
 import argparse
 import json
@@ -6,14 +16,14 @@ import os
 import socket
 from datetime import datetime
 from pathlib import Path
-
+from vae import Encoder
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import Adam
 from torch.utils.tensorboard import SummaryWriter
-from tqdm import trange
-
+from tqdm import trange, tqdm
+import pandas as pd
 import replay
 from config import Config
 from generate_trajectory import (
@@ -22,77 +32,25 @@ from generate_trajectory import (
     generate_trajectories,
     reinterpret_nt_to_t_n,
 )
+from torch.distributions import Categorical
+import torch.nn.functional as F
+from tianshou.policy import DiscreteSACPolicy
+from tianshou.utils.net.common import Net
+from tianshou.data import Batch, ReplayBuffer
 
-# ---------------------------------------------------------
-# 1) NETWORK DEFINITIONS (WMAR encoder + MLP widths)
-# ---------------------------------------------------------
-class QNetwork(nn.Module):
-    def __init__(self, in_channels: int, action_dim: int, config: Config):
-        super().__init__()
-        from vae import Encoder
-        self.encoder = Encoder(img_channels=in_channels, channels=config.cnn_depth)
-        enc_out = self.encoder.output_size
-        hidden = config.mlp_features
-        layers = []
-        for i in range(config.mlp_layers):
-            if i == 0:
-                layers.append(nn.Linear(enc_out + action_dim, hidden))
-            else:
-                layers.append(nn.Linear(hidden, hidden))
-            layers.append(nn.ReLU())
-        layers.append(nn.Linear(hidden, 1))
-        self.fc = nn.Sequential(*layers)
-
-    def forward(self, obs: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
-        z = self.encoder(obs / 255.0)
-        x = torch.cat([z, action], dim=-1)
-        return self.fc(x)
-
-
-class GaussianPolicy(nn.Module):
-    def __init__(self, in_channels: int, action_dim: int, config: Config):
-        super().__init__()
-        from vae import Encoder
-        self.encoder = Encoder(img_channels=in_channels, channels=config.cnn_depth)
-        enc_out = self.encoder.output_size
-        hidden = config.mlp_features
-        layers = []
-        # Fix: ensure first layer uses encoder output size, subsequent use hidden size
-        for i in range(config.mlp_layers):
-            if i == 0:
-                layers.append(nn.Linear(enc_out, hidden))
-            else:
-                layers.append(nn.Linear(hidden, hidden))
-            layers.append(nn.ReLU())
-        self.mlp = nn.Sequential(*layers)
-        self.mean_layer = nn.Linear(hidden, action_dim)
-        self.log_std_layer = nn.Linear(hidden, action_dim)
-
-    def forward(self, obs: torch.Tensor):
-        z = self.encoder(obs / 255.0)
-        h = self.mlp(z)
-        mean = self.mean_layer(h)
-        log_std = self.log_std_layer(h).clamp(-20, 2)
-        std = torch.exp(log_std)
-        return mean, std
-
-    def sample(self, obs: torch.Tensor):
-        mean, std = self(obs)
-        dist = torch.distributions.Normal(mean, std)
-        x_t = dist.rsample()
-        action = torch.tanh(x_t)
-        log_prob = dist.log_prob(x_t) - torch.log(1 - action.pow(2) + 1e-6)
-        return action, log_prob.sum(-1, keepdim=True)
-
-
-# ---------------------------------------------------------
-# 2) SAC TRAINING LOOP (with WMAR‐style logging & progress)
-# ---------------------------------------------------------
 def train_sac(config: Config):
+    # detect device (MPS > CUDA > CPU), mps for Mac m1,m2, ...
+    if torch.backends.mps.is_available():
+        device = torch.device('mps')
+    elif torch.cuda.is_available():
+        device = torch.device('cuda')
+    else:
+        device = torch.device('cpu')
+    print(f"Using device: {device}")
+
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
 
-    # build run_name & log_dir
     current_time = datetime.now().strftime("%b%d_%H-%M-%S")
     run_name = f"{current_time}_{socket.gethostname()}_seed{config.seed}"
     log_root = Path("runs") / "sac"
@@ -102,119 +60,124 @@ def train_sac(config: Config):
     config.save(log_dir / "config.json")
     writer = SummaryWriter(log_dir=str(log_dir))
 
+    # environment
     schedule = config.get_env_schedule()
-    replay_buffer = config.get_replay_buffer()
 
-    # use 32×32 resolution as per WMAR
-    dummy = torch.zeros(1, 3, 32, 32).cuda()
-    in_ch = dummy.shape[1]
-    act_dim = config.action_space
-    policy = GaussianPolicy(in_ch, act_dim, config).cuda()
-    q1 = QNetwork(in_ch, act_dim, config).cuda()
-    q2 = QNetwork(in_ch, act_dim, config).cuda()
-    target_q1 = QNetwork(in_ch, act_dim, config).cuda()
-    target_q2 = QNetwork(in_ch, act_dim, config).cuda()
-    target_q1.load_state_dict(q1.state_dict())
-    target_q2.load_state_dict(q2.state_dict())
+    # Tianshou replay buffer for off-policy updates
+    ts_buffer = ReplayBuffer(size=config.sac_dv3_data_n_max, device=device)
 
-    policy_opt = Adam(policy.parameters(), lr=config.sac_lr)
-    q1_opt = Adam(q1.parameters(), lr=config.sac_lr)
-    q2_opt = Adam(q2.parameters(), lr=config.sac_lr)
+    # Tianshou Discrete SAC setup
+    sample_env = schedule.funcs()[0]()
+    obs_shape = sample_env.observation_space.shape
+    action_n = sample_env.action_space.n
 
+    hidden_sizes = [config.mlp_features] * config.mlp_layers
+    actor_net   = Net(obs_shape, action_n, hidden_sizes, device=device)
+    critic1_net = Net(obs_shape, action_n, hidden_sizes, device=device)
+    critic2_net = Net(obs_shape, action_n, hidden_sizes, device=device)
+
+    critic1 = critic1_net.model.to(device)
+    critic2 = critic2_net.model.to(device)
+    actor_net = actor_net.to(device)     
+
+    critic1_opt = Adam(critic1.parameters(), lr=config.sac_lr)
+    critic2_opt = Adam(critic2.parameters(), lr=config.sac_lr)
+    actor_opt   = Adam(actor_net.parameters(),   lr=config.sac_lr)
+
+    policy = DiscreteSACPolicy(
+        actor_net,   actor_opt,
+        critic1,     critic1_opt,
+        critic2,     critic2_opt,
+        tau=config.sac_tau,
+        gamma=config.sac_gamma,
+        alpha=config.sac_alpha,
+    ).to(device)
+
+
+    eval_history = []
     total_env_steps = 0
     global_step = 0
     best_rews_mean = -float("inf")
+    for epoch in trange(config.epochs, desc="Epochs"):
+        tqdm.write(f"Starting epoch {epoch+1}/{config.epochs}")
+        if config.random_policy == "first":
+            random_policy = epoch == 0
+        elif config.random_policy == "new":
+            random_policy = schedule.is_new_env()
 
-    for epoch in range(config.epochs):
+        # data collection
+        for _ in range(
+            config.pretrain_data_multiplier if (random_policy and config.pretrain_enabled) else 1
+        ):
+            
+            acts, obss, rews, conts, resets = reinterpret_nt_to_t_n(
+                *generate_trajectories(
+                    config.n_sync * config.gen_seq_len,
+                    config.n_sync,
+                    wm=None,
+                    ac=None if random_policy else policy,
+                    env_fns=schedule.funcs(),
+                    env_repeat=config.env_repeat,
+                ),
+                config.data_t,
+                config.data_n,
+            )
+            next_obss = torch.cat([obss[1:], obss[-1:]], dim=0)
+            obs_np  = obss.cpu().numpy()
+            act_np  = acts.cpu().numpy()
+            rew_np  = rews.cpu().numpy()
+            term_np = resets.cpu().numpy()
+            next_np = next_obss.cpu().numpy()
+            #print(f"[DEBUG] Pre‑flatten shapes → obs: {obs_np.shape}, act: {act_np.shape}, rew: {rew_np.shape}, term: {term_np.shape}, next_obs: {next_np.shape}")
 
-        # DATA COLLECTION
-        acts, obss, rews, conts, resets = reinterpret_nt_to_t_n(
-            *generate_trajectories(
-                config.n_sync * config.gen_seq_len,
-                config.n_sync,
-                wm=None,
-                ac=policy,
-                env_fns=schedule.funcs(),
-                env_repeat=config.env_repeat,
-            ),
-            config.data_t,
-            config.data_n,
-        )
-        replay_buffer.add(acts, obss, rews, conts, resets)
+            T, N = obs_np.shape[0], obs_np.shape[1]
+            B = T * N
+
+            # reshape into B transitions
+            obs_arr  = obs_np.reshape((B,) + obs_np.shape[2:])   
+            act_arr  = act_np.reshape((B,) + act_np.shape[2:])   
+            if act_arr.ndim == 1:
+                act_arr = act_arr[:, None]                        
+
+            rew_arr  = rew_np.reshape(B)                         
+            term_arr = term_np.reshape(B)                       
+            next_arr = next_np.reshape((B,) + next_np.shape[2:]) # [B, C, H, W]
+            #show shapes after flattening
+            #print(f"[DEBUG] Flattened shapes → obs: {obs_arr.shape}, act: {act_arr.shape}, rew: {rew_arr.shape}, term: {term_arr.shape}, next_obs: {next_arr.shape}")
+
+            rew_list   = rew_arr.tolist()    # list of floats
+            term_list  = term_arr.tolist()   # list of bools or 0/1
+            trunc_list = [False] * B
+
+
+            for idx, (o_i, a_i, r_i, d_i, t_i, o2_i) in enumerate(
+                zip(obs_arr, act_arr, rew_list, term_list, trunc_list, next_arr)
+            ):
+                if isinstance(a_i, np.ndarray):
+                    act_scalar = int(a_i.squeeze())
+                else:
+                    act_scalar = int(a_i)
+                ts_buffer.add(Batch(
+                    obs=        o_i,
+                    act=        act_scalar,   # now shape [B]
+                    rew=        r_i,
+                    terminated=d_i,
+                    truncated= t_i,
+                    obs_next=   o2_i
+                ))
+
+
         schedule.step()
-        print(f"[Epoch {epoch+1:4d}] Replay‐buffer size (transitions): {replay_buffer.n_valid}")
 
-        # SAMPLE METRICS
-        total_env_steps += acts.shape[0] * acts.shape[1] * config.env_repeat
-        writer.add_scalar("Sample/total_env_steps", total_env_steps, global_step)
-        writer.add_scalar("Sample/replay_buffer_size", replay_buffer.n_valid, global_step)
         writer.add_scalar("Sample/total_train_iters", global_step, global_step)
 
-        # PERFORMANCE METRICS
         rews_eps_mean = rews.sum().item() / resets.sum().item()
         writer.add_scalar("Perf/rews_eps_mean", rews_eps_mean, global_step)
         len_eps_mean = config.gen_seq_len / resets.sum().item() * config.env_repeat
         writer.add_scalar("Perf/len_eps_mean", len_eps_mean, global_step)
 
-        Q1_loss_val = Q2_loss_val = policy_loss_val = None
-
-        # SAC UPDATES
-
-        for _ in range(config.ac_train_steps):
-            if replay_buffer.n_valid < config.sac_batch_size:
-                continue
-            mb_acts, mb_obs, mb_rews, mb_conts, mb_resets = replay_buffer.minibatch(
-                mb_t=1, mb_n=config.sac_batch_size, mb_device="cuda"
-            )
-            mb_obs = mb_obs.squeeze(0)
-            mb_acts = mb_acts.squeeze(0)
-            mb_rews = mb_rews.squeeze(0)
-            nonterm = (1 - mb_resets.squeeze(0)).float().cuda()
-
-            # targets
-            with torch.no_grad():
-                next_a, next_logp = policy.sample(mb_obs)
-                tq1 = target_q1(mb_obs, next_a)
-                tq2 = target_q2(mb_obs, next_a)
-                target_Q = mb_rews + config.sac_gamma * nonterm * (
-                    torch.min(tq1, tq2) - config.sac_alpha * next_logp
-                )
-
-            # Q losses and update
-            q1_loss = nn.MSELoss()(q1(mb_obs, mb_acts), target_Q)
-            q2_loss = nn.MSELoss()(q2(mb_obs, mb_acts), target_Q)
-            q1_opt.zero_grad(); q1_loss.backward(); q1_opt.step()
-            q2_opt.zero_grad(); q2_loss.backward(); q2_opt.step()
-
-            # policy loss and update
-            new_a, logp_pi = policy.sample(mb_obs)
-            q_pi = torch.min(q1(mb_obs, new_a), q2(mb_obs, new_a))
-            policy_loss = (config.sac_alpha * logp_pi - q_pi).mean()
-            policy_opt.zero_grad(); policy_loss.backward(); policy_opt.step()
-
-            # soft updates
-            for p, tp in zip(q1.parameters(), target_q1.parameters()):
-                tp.data.mul_(1 - config.sac_tau); tp.data.add_(config.sac_tau * p.data)
-            for p, tp in zip(q2.parameters(), target_q2.parameters()):
-                tp.data.mul_(1 - config.sac_tau); tp.data.add_(config.sac_tau * p.data)
-
-            # stash and display losses
-            Q1_loss_val     = q1_loss.item()
-            Q2_loss_val     = q2_loss.item()
-            policy_loss_val = policy_loss.item()
-
-        # METRIC LOGS
-        grad_norm = torch.nn.utils.clip_grad_norm_(q1.parameters(), 1000)
-        writer.add_scalar("Metric/grad_norm", grad_norm, global_step)
-        if Q1_loss_val is not None:
-            writer.add_scalar("Metric/Q1_loss",    Q1_loss_val,    global_step)
-            writer.add_scalar("Metric/Q2_loss",    Q2_loss_val,    global_step)
-            writer.add_scalar("Metric/Policy_loss", policy_loss_val, global_step)
-
-        # EVALUATION
+        # evaluation every 10 epochs
         if epoch % 10 == 0:
-            print(f"Epoch: {epoch}/{config.epochs} ...")
-            print("Evaluation started...")
             eval_means, eval_stds = [], []
             for efns in schedule.eval_funcs():
                 m, s = evaluate(
@@ -227,21 +190,50 @@ def train_sac(config: Config):
                 )
                 eval_means.append(m)
                 eval_stds.append(s)
-            writer.add_scalars("Perf/eval_rew_eps_mean", {f"{i}": v for i, v in enumerate(eval_means)}, global_step)
-            writer.add_scalars("Perf/eval_rew_eps_std", {f"{i}": s for i, s in enumerate(eval_stds)}, global_step)
+            writer.add_scalars(
+                "Perf/eval_rew_eps_mean", {f"{i}": v for i, v in enumerate(eval_means)}, global_step
+            )
+            writer.add_scalars(
+                "Perf/eval_rew_eps_std",  {f"{i}": s for i, s in enumerate(eval_stds)}, global_step
+            )
+            
+            for mean_i, std_i in zip(eval_means, eval_stds):
+                eval_history.append({
+                    "step": global_step,
+                    "Perf/eval_rew_eps_mean": mean_i,
+                    "Perf/eval_rew_eps_std":  std_i
+                })
+            df = pd.DataFrame(eval_history)
+            tqdm.write(df.to_string())
+            csv_path = f"{log_dir}/eval_history.csv"
+            df.to_csv(csv_path, index=False)
+
+    
+            
             approx_perf = float(np.mean(eval_means))
-            writer.add_scalar("Perf/approx_perf", approx_perf, global_step)
+            writer.add_scalar("Perf/approx_perf", approx_perf, epoch)
             if approx_perf >= best_rews_mean:
                 best_rews_mean = approx_perf
-                torch.save(policy.state_dict(), log_dir / "save_sac_policy_best.pt")
-                torch.save(q1.state_dict(),      log_dir / "save_sac_q1_best.pt")
-                torch.save(q2.state_dict(),      log_dir / "save_sac_q2_best.pt")
+                torch.save(actor_net.state_dict(),   log_dir / "actor_best.pth")
+                torch.save(critic1_net.state_dict(), log_dir / "critic1_best.pth")
+                torch.save(critic2_net.state_dict(), log_dir / "critic2_best.pth")
+        schedule.step()
+        # SAC updates
+        for _ in range(config.steps_per_batch):
+            losses = policy.update(
+                config.sac_batch_size,
+                ts_buffer
+            )
 
-        global_step += 1
+            if global_step % config.log_frequency == 0:
+                writer.add_scalar("Metric/actor_loss",   losses['loss/actor'],   global_step)
+                writer.add_scalar("Metric/critic1_loss", losses['loss/critic1'], global_step)
+                writer.add_scalar("Metric/critic2_loss", losses['loss/critic2'], global_step)
+            global_step += 1
+
 
     # FINAL CHECKPOINT
-    torch.save(policy.state_dict(), log_dir / "policy.pt")
-    torch.save(q1.state_dict(),      log_dir / "q1.pt")
-    torch.save(q2.state_dict(),      log_dir / "q2.pt")
+    torch.save(actor_net.state_dict(),   log_dir / "actor.pth")
+    torch.save(critic1_net.state_dict(), log_dir / "critic1.pth")
+    torch.save(critic2_net.state_dict(), log_dir / "critic2.pth")
     writer.close()
-

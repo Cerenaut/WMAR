@@ -1,3 +1,14 @@
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    category=UserWarning,
+    module=r"gym\.utils\.passive_env_checker"
+)
+warnings.filterwarnings(
+    "ignore",
+    category=DeprecationWarning,
+    module=r"gym\.utils\.passive_env_checker"
+)
 import time
 from datetime import datetime
 import argparse
@@ -11,6 +22,15 @@ import torch
 from torch.optim import Adam
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
+# detect device (MPS > CUDA > CPU)
+if torch.backends.mps.is_available():
+    device = torch.device('mps')
+elif torch.cuda.is_available():
+    device = torch.device('cuda')
+else:
+    device = torch.device('cpu')
+print(f"Using device: {device}")
+
 
 import replay
 from ac import ActorCriticOpt, train_ac_from_wm
@@ -57,13 +77,12 @@ if __name__ == "__main__":
         config.mlp_features,
         config.mlp_layers,
         config.wall_time_optimisation,
-    ).cuda()
+    ).device()
     opt = Adam(wm.parameters(), lr=config.wm_lr)
 
     envs = config.get_env_schedule()
     replay = config.get_replay_buffer()    
 
-    # OPTIONAL: Load from existing
     aco: Optional[ActorCriticOpt] = None
 
     if not log_dir:
@@ -78,15 +97,14 @@ if __name__ == "__main__":
     config.save(log_dir / "config.json")
 
     
-    total_env_steps = 0        # number of *real* environment interactions so far
+    total_env_steps = 0       
 
     best_rews_mean = float("-inf")
-    global_step = 0            # gradient updates so far  training iterations
+    global_step = 0    
     runs_root = Path("runs") / config.algorithm  
     runs_root.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(config.epochs):
-
         if config.random_policy == "first":
             random_policy = epoch == 0
         elif config.random_policy == "new":
@@ -108,12 +126,10 @@ if __name__ == "__main__":
             )
             replay.add(_acts, _obss, _rews, _conts, _resets)
 
-            # Each tuple (t, n) counts as one env step; multiply by env_repeat.
 
             num_new_env_steps = _acts.shape[0] * _acts.shape[1] * config.env_repeat
             total_env_steps += num_new_env_steps
             writer.add_scalar("Sample/total_env_steps", total_env_steps, global_step)
-            # Also expose current replay size – handy to visualise replay reuse
             writer.add_scalar("Sample/replay_buffer_size", replay.n_valid, global_step)
 
         envs.step()
@@ -195,7 +211,7 @@ if __name__ == "__main__":
                         writer.add_scalar(metric_key, metric_value, global_step)
 
                     if log_images:
-                        original = _obss[:16, 0:2].cuda()
+                        original = _obss[:16, 0:2].device()
                         writer.add_images(
                             "original", original.swapaxes(0, 1).flatten(0, 1), global_step
                         )
@@ -203,7 +219,7 @@ if __name__ == "__main__":
                         init_z, init_h = wm.rssm.initial_state(original.shape[1])
                         no_resets = torch.zeros(*original.shape[:2], 1, device=init_z.device)
                         z_posts, z, h = wm.rssm(
-                            init_z, _acts[:, 0:2].cuda(), init_h, original, no_resets
+                            init_z, _acts[:, 0:2].device(), init_h, original, no_resets
                         )
                         zhs = wm.zh_transform(z, h)
                         recon = torch.stack([wm.decoder(zh) for zh in zhs])
@@ -223,7 +239,7 @@ if __name__ == "__main__":
                             z.swapaxes(0, 1).flatten(0, 1).unsqueeze(1),
                             global_step,
                         )
-            global_step += 1  # training‑iteration counter
+            global_step += 1 
 
         if config.fresh_ac and epoch % config.fresh_ac == 0:
             aco, approx_perf = train_ac_from_wm(
@@ -252,7 +268,6 @@ if __name__ == "__main__":
             torch.save(aco.ac.state_dict(), log_dir / "save_ac.pt")
         
         
-        torch.cuda.empty_cache()
 
     end_time = datetime.now()
     print(f"Training ended   at {end_time.isoformat()}")

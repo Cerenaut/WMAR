@@ -32,11 +32,40 @@ from generate_trajectory import (
     generate_trajectories,
     reinterpret_nt_to_t_n,
 )
-from torch.distributions import Categorical
-import torch.nn.functional as F
 from tianshou.policy import DiscreteSACPolicy
-from tianshou.utils.net.common import Net
 from tianshou.data import Batch, ReplayBuffer
+
+
+class CoinRunCNN(nn.Module):
+    def __init__(self, input_shape, output_dim, return_state=False):
+        super().__init__()
+        c, h, w = input_shape
+        self.cnn = nn.Sequential(
+            nn.Conv2d(c, 32, kernel_size=8, stride=4), nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2), nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1), nn.ReLU(),
+            nn.Flatten(),
+        )
+        with torch.no_grad():
+            dummy = torch.zeros(1, c, h, w)
+            n_flatten = self.cnn(dummy).shape[1]
+        self.head = nn.Linear(n_flatten, output_dim)
+        self.return_state = return_state
+
+    def forward(self, x, state=None, info={}):
+        if isinstance(x, np.ndarray):
+            x = torch.from_numpy(x)
+        x = x.to(next(self.parameters()).device)
+        if x.dtype == torch.uint8:
+            x = x.float() / 255.0
+        if x.ndim == 3:
+            x = x.unsqueeze(0)
+        out = self.head(self.cnn(x))
+        if self.return_state:
+            return out, state
+        else:
+            return out
+
 
 def train_sac(config: Config):
     # detect device (MPS > CUDA > CPU), mps for Mac m1,m2, ...
@@ -68,21 +97,23 @@ def train_sac(config: Config):
 
     # Tianshou Discrete SAC setup
     sample_env = schedule.funcs()[0]()
-    obs_shape = sample_env.observation_space.shape
+    # Check the obs_shape you get from sample_env
+    obs_shape = sample_env.observation_space.shape  # often (64, 64, 3)
+    if len(obs_shape) == 3 and obs_shape[0] in [64, 128]:  # probably (H, W, C)
+        obs_shape = (obs_shape[2], obs_shape[0], obs_shape[1])  # (C, H, W)
     action_n = sample_env.action_space.n
 
-    hidden_sizes = [config.mlp_features] * config.mlp_layers
-    actor_net   = Net(obs_shape, action_n, hidden_sizes, device=device)
-    critic1_net = Net(obs_shape, action_n, hidden_sizes, device=device)
-    critic2_net = Net(obs_shape, action_n, hidden_sizes, device=device)
+    actor_net   = CoinRunCNN(obs_shape, action_n, return_state=True).to(device)
+    # For critics (just Q-value tensor)
+    critic1_net = CoinRunCNN(obs_shape, action_n, return_state=False).to(device)
+    critic2_net = CoinRunCNN(obs_shape, action_n, return_state=False).to(device)
 
-    critic1 = critic1_net.model.to(device)
-    critic2 = critic2_net.model.to(device)
-    actor_net = actor_net.to(device)     
-
-    critic1_opt = Adam(critic1.parameters(), lr=config.sac_lr)
-    critic2_opt = Adam(critic2.parameters(), lr=config.sac_lr)
-    actor_opt   = Adam(actor_net.parameters(),   lr=config.sac_lr)
+    critic1 = critic1_net
+    critic2 = critic2_net
+    sac_lr = 0.0001
+    critic1_opt = Adam(critic1.parameters(), lr=sac_lr)
+    critic2_opt = Adam(critic2.parameters(), lr=sac_lr)
+    actor_opt   = Adam(actor_net.parameters(),   lr=sac_lr)
 
     policy = DiscreteSACPolicy(
         actor_net,   actor_opt,
@@ -99,12 +130,12 @@ def train_sac(config: Config):
     global_step = 0
     best_rews_mean = -float("inf")
     for epoch in trange(config.epochs, desc="Epochs"):
-        tqdm.write(f"Starting epoch {epoch+1}/{config.epochs}")
+
         if config.random_policy == "first":
             random_policy = epoch == 0
         elif config.random_policy == "new":
             random_policy = schedule.is_new_env()
-
+        
         # data collection
         for _ in range(
             config.pretrain_data_multiplier if (random_policy and config.pretrain_enabled) else 1
@@ -134,7 +165,9 @@ def train_sac(config: Config):
             B = T * N
 
             # reshape into B transitions
-            obs_arr  = obs_np.reshape((B,) + obs_np.shape[2:])   
+            obs_arr  = obs_np.reshape((B,) + obs_np.shape[2:])  
+            print(f"[DEBUG] obs_arr shape: {obs_arr.shape}")
+ 
             act_arr  = act_np.reshape((B,) + act_np.shape[2:])   
             if act_arr.ndim == 1:
                 act_arr = act_arr[:, None]                        
@@ -150,7 +183,7 @@ def train_sac(config: Config):
             trunc_list = [False] * B
 
 
-            for idx, (o_i, a_i, r_i, d_i, t_i, o2_i) in enumerate(
+            for _, (o_i, a_i, r_i, d_i, t_i, o2_i) in enumerate(
                 zip(obs_arr, act_arr, rew_list, term_list, trunc_list, next_arr)
             ):
                 if isinstance(a_i, np.ndarray):
@@ -215,11 +248,11 @@ def train_sac(config: Config):
             if approx_perf >= best_rews_mean:
                 best_rews_mean = approx_perf
                 torch.save(actor_net.state_dict(),   log_dir / "actor_best.pth")
-                torch.save(critic1_net.state_dict(), log_dir / "critic1_best.pth")
-                torch.save(critic2_net.state_dict(), log_dir / "critic2_best.pth")
+                torch.save(critic1.state_dict(), log_dir / "critic1_best.pth")
+                torch.save(critic2.state_dict(), log_dir / "critic2_best.pth")
         schedule.step()
         # SAC updates
-        for _ in range(config.steps_per_batch):
+        for _ in range(config.steps_per_batch): #1000 too low for sac
             losses = policy.update(
                 config.sac_batch_size,
                 ts_buffer
@@ -234,6 +267,6 @@ def train_sac(config: Config):
 
     # FINAL CHECKPOINT
     torch.save(actor_net.state_dict(),   log_dir / "actor.pth")
-    torch.save(critic1_net.state_dict(), log_dir / "critic1.pth")
-    torch.save(critic2_net.state_dict(), log_dir / "critic2.pth")
+    torch.save(critic1.state_dict(), log_dir / "critic1.pth")
+    torch.save(critic2.state_dict(), log_dir / "critic2.pth")
     writer.close()

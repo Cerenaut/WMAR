@@ -278,7 +278,7 @@ def train_sac(config: Config):
                 torch.save(critic2.state_dict(), log_dir / "critic2_best.pth")
         schedule.step()
         # SAC updates
-        for _ in range(10000):
+        for _ in range(config.steps_per_batch): # config.steps_per_batch = 1000 in configs files which is too low for sac
             losses = policy.update(
                 config.sac_batch_size,
                 ts_buffer

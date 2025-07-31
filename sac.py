@@ -68,10 +68,7 @@ class CoinRunCNN(nn.Module):
 
 
 def train_sac(config: Config):
-    # detect device (MPS > CUDA > CPU), mps for Mac m1,m2, ...
-    if torch.backends.mps.is_available():
-        device = torch.device('cpu')
-    elif torch.cuda.is_available():
+    if torch.cuda.is_available():
         device = torch.device('cuda')
     else:
         device = torch.device('cpu')

@@ -30,7 +30,7 @@ from generate_trajectory import (
     SequentialEnvironments,
     evaluate,
     generate_trajectories,
-    reinterpret_nt_to_t_n,
+    reinterpret_nt_to_t_n_sac,
 )
 from tianshou.policy import DiscreteSACPolicy
 from tianshou.data import Batch, ReplayBuffer
@@ -154,7 +154,7 @@ def train_sac(config: Config):
             config.pretrain_data_multiplier if (random_policy and config.pretrain_enabled) else 1
         ):
             
-            acts, obss, rews, conts, resets = reinterpret_nt_to_t_n(
+            acts, obss, rews, conts, resets = reinterpret_nt_to_t_n_sac(
                 *generate_trajectories(
                     config.n_sync * config.gen_seq_len,
                     config.n_sync,

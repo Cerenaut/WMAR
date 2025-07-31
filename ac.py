@@ -21,9 +21,7 @@ ReturnT = torch.Tensor
 # RewardSymlogCatT (probs): [ N 255 ]
 # RewardT (real): [ N 1 ]
 N_CRITIC_BINS = 255
-if torch.backends.mps.is_available():
-    device = torch.device('cpu')
-elif torch.cuda.is_available():
+if torch.cuda.is_available():
     device = torch.device('cuda')
 else:
     device = torch.device('cpu')

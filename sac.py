@@ -70,7 +70,7 @@ class CoinRunCNN(nn.Module):
 def train_sac(config: Config):
     # detect device (MPS > CUDA > CPU), mps for Mac m1,m2, ...
     if torch.backends.mps.is_available():
-        device = torch.device('mps')
+        device = torch.device('cpu')
     elif torch.cuda.is_available():
         device = torch.device('cuda')
     else:
@@ -97,23 +97,37 @@ def train_sac(config: Config):
 
     # Tianshou Discrete SAC setup
     sample_env = schedule.funcs()[0]()
-    # Check the obs_shape you get from sample_env
-    obs_shape = sample_env.observation_space.shape  # often (64, 64, 3)
-    if len(obs_shape) == 3 and obs_shape[0] in [64, 128]:  # probably (H, W, C)
+    
+    # Gym gives HWC, PyTorch needs CHW.
+    obs_shape = sample_env.observation_space.shape 
+    if len(obs_shape) == 3 and obs_shape[0] in [64, 128]:  # (H, W, C)
         obs_shape = (obs_shape[2], obs_shape[0], obs_shape[1])  # (C, H, W)
     action_n = sample_env.action_space.n
 
     actor_net   = CoinRunCNN(obs_shape, action_n, return_state=True).to(device)
+    
+    #  sanity‐check network I/O 
+    with torch.no_grad():
+        sample = torch.randn(32, *obs_shape).to(device)
+        logits, _ = actor_net(sample)
+        print(f"[SANITY] actor_net output shape: {logits.shape}") 
+
+
+
     # For critics (just Q-value tensor)
     critic1_net = CoinRunCNN(obs_shape, action_n, return_state=False).to(device)
     critic2_net = CoinRunCNN(obs_shape, action_n, return_state=False).to(device)
 
+    with torch.no_grad():
+        q1 = critic1_net(sample)
+        print(f"[SANITY] critic1_net output shape: {q1.shape}") 
+
     critic1 = critic1_net
     critic2 = critic2_net
-    sac_lr = 0.0001
-    critic1_opt = Adam(critic1.parameters(), lr=sac_lr)
-    critic2_opt = Adam(critic2.parameters(), lr=sac_lr)
-    actor_opt   = Adam(actor_net.parameters(),   lr=sac_lr)
+
+    critic1_opt = Adam(critic1.parameters(), lr=config.sac_lr)
+    critic2_opt = Adam(critic2.parameters(), lr=config.sac_lr)
+    actor_opt   = Adam(actor_net.parameters(),   lr=config.sac_lr)
 
     policy = DiscreteSACPolicy(
         actor_net,   actor_opt,
@@ -126,7 +140,6 @@ def train_sac(config: Config):
 
 
     eval_history = []
-    total_env_steps = 0
     global_step = 0
     best_rews_mean = -float("inf")
     for epoch in trange(config.epochs, desc="Epochs"):
@@ -135,7 +148,7 @@ def train_sac(config: Config):
             random_policy = epoch == 0
         elif config.random_policy == "new":
             random_policy = schedule.is_new_env()
-        
+
         # data collection
         for _ in range(
             config.pretrain_data_multiplier if (random_policy and config.pretrain_enabled) else 1
@@ -173,14 +186,19 @@ def train_sac(config: Config):
                 act_arr = act_arr[:, None]                        
 
             rew_arr  = rew_np.reshape(B)                         
-            term_arr = term_np.reshape(B)                       
+            term_arr = term_np.reshape(B)
+            cont_arr  = conts.cpu().numpy().reshape(B)            
             next_arr = next_np.reshape((B,) + next_np.shape[2:]) # [B, C, H, W]
-            #show shapes after flattening
+            
             #print(f"[DEBUG] Flattened shapes → obs: {obs_arr.shape}, act: {act_arr.shape}, rew: {rew_arr.shape}, term: {term_arr.shape}, next_obs: {next_arr.shape}")
 
-            rew_list   = rew_arr.tolist()    # list of floats
-            term_list  = term_arr.tolist()   # list of bools or 0/1
-            trunc_list = [False] * B
+            rew_list   = rew_arr.tolist()    
+            term_list  = term_arr.tolist()   
+
+            trunc_list = [
+                (cont_arr[i] == 0) and (not term_list[i])
+                for i in range(B)
+            ]
 
 
             for _, (o_i, a_i, r_i, d_i, t_i, o2_i) in enumerate(
@@ -198,6 +216,14 @@ def train_sac(config: Config):
                     truncated= t_i,
                     obs_next=   o2_i
                 ))
+            # debug prints 
+            print(f"[DEBUG]  terminals: {sum(term_list)}  truncations: {sum(trunc_list)}  total: {B}")
+            zeros = int((cont_arr == 0).sum())
+            print(f"[DEBUG] cont_arr zeros: {zeros}")
+            print(f"[DEBUG] term+trunc = {sum(term_list) + sum(trunc_list)}")
+            end_arr = ((cont_arr == 0) | (term_arr == 1))
+            print(f"[DEBUG]  total ends by cont|term: {int(end_arr.sum())}")
+            print(f"[DEBUG]  term+trunc         : {sum(term_list) + sum(trunc_list)}")
 
 
         schedule.step()
@@ -252,7 +278,7 @@ def train_sac(config: Config):
                 torch.save(critic2.state_dict(), log_dir / "critic2_best.pth")
         schedule.step()
         # SAC updates
-        for _ in range(config.steps_per_batch): #1000 too low for sac
+        for _ in range(10000):
             losses = policy.update(
                 config.sac_batch_size,
                 ts_buffer

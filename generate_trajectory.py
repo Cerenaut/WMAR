@@ -265,7 +265,7 @@ def generate_trajectories(
         torch.from_numpy(np.concatenate(resets)[:n]).float().unsqueeze(-1),
     )
 # for dv3/wmar
-"""
+
 def reinterpret_nt_to_t_n(
     acts: ActionT, obss: ImageT, rews: RewardT, conts: ContT, resets: ResetT, t: int, n: int
 ) -> Tuple[ActionT, ImageT, RewardT, ContT, ResetT]:
@@ -278,9 +278,9 @@ def reinterpret_nt_to_t_n(
         conts.reshape(n, t, 1).swapaxes(0, 1),
         resets.reshape(n, t, 1).swapaxes(0, 1),
     )
-"""
+
 # for sac
-def reinterpret_nt_to_t_n(
+def reinterpret_nt_to_t_n_sac(
     acts,    # shape=(t*n, …)
     obss,    # shape=(t*n, …)
     rews,    # shape=(t*n, …)

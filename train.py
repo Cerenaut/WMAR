@@ -22,10 +22,7 @@ import torch
 from torch.optim import Adam
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
-# detect device (MPS > CUDA > CPU)
-if torch.backends.mps.is_available():
-    device = torch.device('mps')
-elif torch.cuda.is_available():
+if torch.cuda.is_available():
     device = torch.device('cuda')
 else:
     device = torch.device('cpu')

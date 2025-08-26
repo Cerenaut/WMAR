@@ -3,6 +3,7 @@ from typing import Tuple
 import torch
 import torch.distributions as td
 import torch.nn as nn
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 class CatVae(nn.Module):
@@ -12,46 +13,62 @@ class CatVae(nn.Module):
         self.n_dis = n_dis
         self.n_cls = n_cls
 
-        self.encoder = Encoder(img_channels, n_dis, n_cls, channels)
-        self.decoder = Decoder(img_channels, n_dis * n_cls, channels)
+        self.encoder = Encoder(img_channels, n_dis, n_cls, channels).to(device)
+        self.decoder = Decoder(img_channels, n_dis * n_cls, channels).to(device)
 
         self.prior_probs: torch.Tensor
-        self.register_buffer("prior_probs", torch.ones(n_dis, n_cls) / n_cls)
+        self.register_buffer("prior_probs", torch.ones(n_dis, n_cls, device=device) / n_cls)
         self.prior_dist = td.OneHotCategorical(self.prior_probs)
 
     def __call__(self, *args, **kwds) -> Tuple[td.OneHotCategorical, torch.Tensor, torch.Tensor]:
         return super().__call__(*args, **kwds)
 
     def forward(
-        self, x: torch.Tensor, stochastic: bool = True
+        self,
+        x: torch.Tensor,
+        stochastic: bool = True
     ) -> Tuple[td.OneHotCategorical, torch.Tensor, torch.Tensor]:
-        # Returns (log_latents, latents, reconstruction)
-        z: torch.Tensor = self.encoder(x)
-        z_probs = z.exp()
-        dist = td.OneHotCategorical(logits=z)
-        straight_through_gradient = z_probs - z_probs.detach()
+        # move input to the VAE's device
+        dev = self.prior_probs.device
+        x   = x.to(dev, non_blocking=True)
+
+        # original encoding logic
+        z           = self.encoder(x)
+        z_probs     = z.exp()
+        dist        = td.OneHotCategorical(logits=z)
+        straight_through = z_probs - z_probs.detach()
+
         if stochastic:
-            z_sample = dist.sample() + straight_through_gradient
+            z_sample = dist.sample() + straight_through
         else:
-            z_sample = dist.mode + straight_through_gradient
+            z_sample = dist.mode + straight_through
 
+        # original decoding (with flatten(1))
         r = self.decoder(z_sample.flatten(1))
-
         return dist, z_sample, r
 
-    def loss(self, x: torch.Tensor, y: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        z_dist, _, r = self(x)
-        reconstruction_loss = (r - y).square()
+    def loss(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # send both inputs to the same device
+        dev = self.prior_probs.device
+        x   = x.to(dev, non_blocking=True)
+        y   = y.to(dev, non_blocking=True)
 
-        if self.prior_dist.probs.device != self.prior_probs.device:
-            self.prior_dist = td.OneHotCategorical(self.prior_probs)
-            print("Remaking static dist")
-        kl_loss = td.kl_divergence(z_dist, self.prior_dist)
+        # forward pass
+        z_dist, _, r = self.forward(x, stochastic=True)
 
-        return (
-            reconstruction_loss.sum([1, 2, 3]).mean(),
-            kl_loss.sum(1).mean(),
-        )
+        # reconstruction loss (MSE)
+        recon_loss = (r - y).square().sum([1, 2, 3]).mean()
+
+        # rebuild the prior on the correct device
+        prior    = td.OneHotCategorical(probs=self.prior_probs)
+        kl_terms = td.kl_divergence(z_dist, prior)
+        kl_loss  = kl_terms.sum(1).mean()
+
+        return recon_loss, kl_loss
 
 
 class Encoder(nn.Module):

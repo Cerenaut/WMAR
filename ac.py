@@ -6,7 +6,6 @@ import torch.distributions as td
 import torch.nn as nn
 from torch.optim import Adam, Optimizer
 from tqdm import trange
-from typing import Tuple, Dict
 
 from replay import Replay
 from rssm import ActionT, HiddenT, LatentShape, LatentT, get_mlp_layers
@@ -21,18 +20,13 @@ ReturnT = torch.Tensor
 # RewardSymlogCatT (probs): [ N 255 ]
 # RewardT (real): [ N 1 ]
 N_CRITIC_BINS = 255
-if torch.cuda.is_available():
-    device = torch.device('cuda')
-else:
-    device = torch.device('cpu')
-print(f"Using device: {device}")
 
 
 def zh_to_ac_state(z: LatentT, h: HiddenT) -> AcStateT:
     return torch.cat((z.flatten(-2), h), dim=-1)
 
 
-def ac_state_to_zh(state: AcStateT, ls: LatentShape, h_dim: int) -> Tuple[LatentT, HiddenT]:
+def ac_state_to_zh(state: AcStateT, ls: LatentShape, h_dim: int) -> tuple[LatentT, HiddenT]:
     z, h = state[..., :-h_dim], state[..., -h_dim:]
     return z.unflatten(-1, ls), h
 
@@ -71,10 +65,10 @@ class ActorCritic(nn.Module):
             nn.LogSoftmax(-1),
         )
 
-    def __call__(self, state: AcStateT) -> Tuple[ActionLogT, RewardT]:
+    def __call__(self, state: AcStateT) -> tuple[ActionLogT, RewardT]:
         return super().__call__(state)
 
-    def forward(self, state: AcStateT) -> Tuple[ActionLogT, RewardT]:
+    def forward(self, state: AcStateT) -> tuple[ActionLogT, RewardT]:
         # Supports T dimension
         critic_bins = self.critic(state).exp()
         return self.actor(state), symexp(critic_bins @ self.symlog_bins)
@@ -85,7 +79,7 @@ class ActorCritic(nn.Module):
         actions: ActionT,
         lam_returns: ReturnT,
         scale: float,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         action_logs = self.actor(states)
         critic_preds_log = self.critic(states)
 
@@ -125,7 +119,7 @@ def dream_rollout(
     lam: float = 0.95,
     temperature: float = 1.0,
     n_ctx_frames: int = 4,
-) -> Tuple[AcStateT, ActionT, RewardT, ReturnT]:
+) -> tuple[AcStateT, ActionT, RewardT, ReturnT]:
     # Returns: (T=n_steps N=n_sync)
     # States [ T N n_dis n_cls ]
     # Actions [ T N 15 ]
@@ -195,9 +189,9 @@ def train_ac_from_wm(
     dream_steps: int = 16,
     aco: Optional[ActorCriticOpt] = None,
     lr: float = 3e-5,
-) -> Tuple[ActorCriticOpt, torch.Tensor]:
+) -> tuple[ActorCriticOpt, torch.Tensor]:
     if aco is None:
-        ac = ActorCritic(np.prod(wm.ls) + wm.h_dim, wm.a_dim).to(device)
+        ac = ActorCritic(np.prod(wm.ls) + wm.h_dim, wm.a_dim).cuda()
         aco = ActorCriticOpt(ac, Adam(ac.parameters(), lr=lr))
     ac, opt = aco
     for g in opt.param_groups:

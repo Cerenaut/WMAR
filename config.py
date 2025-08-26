@@ -1,9 +1,27 @@
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    category=UserWarning,
+    module=r"gym\.utils\.passive_env_checker"
+)
+warnings.filterwarnings(
+    "ignore",
+    category=DeprecationWarning,
+    module=r"gym\.utils\.passive_env_checker"
+)
+import logging
+logging.getLogger("gym.utils.passive_env_checker").setLevel(logging.ERROR)
+logging.getLogger("gymnasium.utils.passive_env_checker").setLevel(logging.ERROR)
+
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal, Type, TypeVar, Union
 
 import gym
+import sys
+
+sys.modules.setdefault("gym", gym)
 
 import generate_trajectory
 import replay
@@ -35,7 +53,6 @@ class Serialisable:
 
 @dataclass
 class EnvConfig(Serialisable):
-    # Name like "CoinRun+NB+RT+MA"
     name: str
     kwargs: dict[str, Any] = field(default_factory=dict)
     rew_scale: float = 1
@@ -48,8 +65,8 @@ class EnvConfig(Serialisable):
             "use_backgrounds": True,
             "restrict_themes": False,
             "use_monochrome_assets": False,
-            "use_generated_assets": False,   # Procgen option
-            "center_agent": True,            # Procgen option
+            "use_generated_assets": False,  
+            "center_agent": True,            
 
         }
         mods = {
@@ -125,6 +142,25 @@ class Config(Serialisable):
     sac_tau: float = 0.005
     sac_gamma: float = 0.99
     sac_alpha: float = 0.2
+    sac_alpha_lr: float = 1e-3
+    sac_grad_clip: float = 20.0
+    sac_target_entropy_coef: float = 1.0
+    sac_alpha_min: float = 1e-6
+    sac_alpha_max: float = 1.0
+    sac_tes_enabled: bool = False
+    sac_tes_lambda: float = 0.999
+    sac_tes_avg_threshold: float = 0.01
+    sac_tes_std_threshold: float = 0.05
+    sac_tes_discount_k: float = 0.9
+    sac_tes_T: int = 1000
+    sac_tes_start_epoch: int = 0
+    sac_collect_eps: float = 0.05
+    sac_collect_early_eps_epochs: int = 15
+    sac_policy_lr: float = 3e-4
+    sac_eval_every: int = 1
+    sac_eval_entropy_threshold: float = 2.3
+    sac_eval_stochastic_temp: float = 0.5
+    sac_warmup_min_sequences: int = 1024
     img_size: int = 64
 
     seed: int = 1337
@@ -164,7 +200,7 @@ class Config(Serialisable):
     mlp_layers: int = 2
     wall_time_optimisation: bool = False
 
-    action_space: int = 18
+    action_space: int = 15
     replay_buffers: list[RbConfig] = field(default_factory=list)
 
     @classmethod
@@ -202,4 +238,4 @@ class Config(Serialisable):
         if self.algorithm == "dv3" or self.algorithm == "sac":
             rc = self.replay_buffers[0]
             return rc.rb_type(self.data_t, self.sac_dv3_data_n_max, self.action_space, rc.rb_device)
-        #self.sac_dv3_data_n_max
+

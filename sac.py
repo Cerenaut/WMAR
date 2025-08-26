@@ -1,242 +1,245 @@
-import warnings
-warnings.filterwarnings(
-    "ignore",
-    category=UserWarning,
-    module=r"gym\.utils\.passive_env_checker"
-)
-warnings.filterwarnings(
-    "ignore",
-    category=DeprecationWarning,
-    module=r"gym\.utils\.passive_env_checker"
-)
-
-import argparse
-import json
+# sac.py
 import os
 import socket
 from datetime import datetime
 from pathlib import Path
-from vae import Encoder
+import argparse
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import Adam
 from torch.utils.tensorboard import SummaryWriter
-from tqdm import trange, tqdm
-import pandas as pd
-import replay
 from config import Config
 from generate_trajectory import (
-    SequentialEnvironments,
     evaluate,
     generate_trajectories,
-    reinterpret_nt_to_t_n_sac,
+    reinterpret_nt_to_t_n,
 )
-from tianshou.policy import DiscreteSACPolicy
-from tianshou.data import Batch, ReplayBuffer
+from vae import Encoder
+
+from typing import Optional
 
 
-class CoinRunCNN(nn.Module):
-    def __init__(self, input_shape, output_dim, return_state=False):
+class QNetwork(nn.Module):
+    def __init__(self, in_channels: int, action_dim: int, config: Config, encoder: Optional[Encoder] = None):
         super().__init__()
-        c, h, w = input_shape
-        self.cnn = nn.Sequential(
-            nn.Conv2d(c, 32, kernel_size=8, stride=4), nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2), nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1), nn.ReLU(),
-            nn.Flatten(),
-        )
-        with torch.no_grad():
-            dummy = torch.zeros(1, c, h, w)
-            n_flatten = self.cnn(dummy).shape[1]
-        self.head = nn.Linear(n_flatten, output_dim)
-        self.return_state = return_state
+        self.encoder = encoder if encoder is not None else Encoder(img_channels=in_channels, channels=config.cnn_depth)
+        enc_out = self.encoder.output_size
+        hidden = config.mlp_features
+        layers = []
+        for i in range(config.mlp_layers):
+            if i == 0:
+                layers.append(nn.Linear(enc_out, hidden))
+            else:
+                layers.append(nn.Linear(hidden, hidden))
+            layers.append(nn.ReLU())
+        layers.append(nn.Linear(hidden, action_dim))
+        self.fc = nn.Sequential(*layers)
 
-    def forward(self, x, state=None, info={}):
-        if isinstance(x, np.ndarray):
-            x = torch.from_numpy(x)
-        x = x.to(next(self.parameters()).device)
-        if x.dtype == torch.uint8:
-            x = x.float() / 255.0
-        if x.ndim == 3:
-            x = x.unsqueeze(0)
-        out = self.head(self.cnn(x))
-        if self.return_state:
-            return out, state
-        else:
-            return out
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        # Inputs are already normalized to [0,1]
+        z = self.encoder(obs)
+        q_values = self.fc(z)
+        return q_values  # shape: (B, action_dim)
 
 
+class CategoricalPolicy(nn.Module):
+    def __init__(self, in_channels: int, action_dim: int, config: Config, encoder: Optional[Encoder] = None):
+        super().__init__()
+        
+        self.encoder = encoder if encoder is not None else Encoder(img_channels=in_channels, channels=config.cnn_depth)
+        enc_out = self.encoder.output_size
+        hidden = config.mlp_features
+        layers = []
+        for i in range(config.mlp_layers):
+            if i == 0:
+                layers.append(nn.Linear(enc_out, hidden))
+            else:
+                layers.append(nn.Linear(hidden, hidden))
+            layers.append(nn.ReLU())
+        self.mlp = nn.Sequential(*layers)
+        self.logits_layer = nn.Linear(hidden, action_dim)
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        z = self.encoder(obs)
+        h = self.mlp(z)
+        logits = self.logits_layer(h)
+        return logits  # shape: (B, action_dim)
+
+    def probs_and_logprobs(self, obs: torch.Tensor):
+        logits = self(obs)
+        probs = torch.softmax(logits, dim=-1)
+        log_probs = torch.log_softmax(logits, dim=-1)
+        return probs, log_probs
+
+    def sample_action_indices(self, obs: torch.Tensor) -> torch.Tensor:
+        logits = self(obs)
+        dist = torch.distributions.Categorical(logits=logits)
+        return dist.sample()  # shape: (B,)
+
+
+# SAC TRAINING LOOP
 def train_sac(config: Config):
-    if torch.cuda.is_available():
-        device = torch.device('cuda')
-    else:
-        device = torch.device('cpu')
-    print(f"Using device: {device}")
-
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
-
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # build run_name & log_dir
     current_time = datetime.now().strftime("%b%d_%H-%M-%S")
-    run_name = f"{current_time}_{socket.gethostname()}_seed{config.seed}"
-    log_root = Path("runs") / "sac"
+    job_id = os.getenv("SLURM_JOB_ID")
+    run_name = f"{current_time}_{socket.gethostname()}_{config.seed}_{job_id}"
+    print(f"[DEBUG] train_sac: run_name={run_name}")
+    # Use absolute log directory to avoid issues on HPC with changing CWD or cleanup
+    log_root = Path.cwd() / "runs" / "final runs"
     log_root.mkdir(parents=True, exist_ok=True)
     log_dir = log_root / run_name
     log_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[DEBUG] train_sac: log_dir={log_dir}")
     config.save(log_dir / "config.json")
-    writer = SummaryWriter(log_dir=str(log_dir))
+    writer = SummaryWriter(log_dir=str(log_dir.resolve()), flush_secs=10)
 
-    # environment
+
+
     schedule = config.get_env_schedule()
+    replay_buffer = config.get_replay_buffer()
 
-    # Tianshou replay buffer for off-policy updates
-    ts_buffer = ReplayBuffer(size=config.sac_dv3_data_n_max, device=device)
 
-    # Tianshou Discrete SAC setup
-    sample_env = schedule.funcs()[0]()
+    dummy = torch.zeros(1, 3, 32, 32, device=device)
+    in_ch = dummy.shape[1]
+    act_dim = config.action_space
     
-    # Gym gives HWC, PyTorch needs CHW.
-    obs_shape = sample_env.observation_space.shape 
-    if len(obs_shape) == 3 and obs_shape[0] in [64, 128]:  # (H, W, C)
-        obs_shape = (obs_shape[2], obs_shape[0], obs_shape[1])  # (C, H, W)
-    action_n = sample_env.action_space.n
-
-    actor_net   = CoinRunCNN(obs_shape, action_n, return_state=True).to(device)
+    critic_shared_encoder = Encoder(img_channels=in_ch, channels=config.cnn_depth).to(device)
+    # Actor gets its own encoder to avoid gradient interference
+    policy = CategoricalPolicy(in_ch, act_dim, config, encoder=None).to(device)
+    q1 = QNetwork(in_ch, act_dim, config, encoder=critic_shared_encoder).to(device)
+    q2 = QNetwork(in_ch, act_dim, config, encoder=critic_shared_encoder).to(device)
+    target_q1 = QNetwork(in_ch, act_dim, config).to(device)
+    target_q2 = QNetwork(in_ch, act_dim, config).to(device)
     
-    #  sanity‐check network I/O 
-    with torch.no_grad():
-        sample = torch.randn(32, *obs_shape).to(device)
-        logits, _ = actor_net(sample)
-        print(f"[SANITY] actor_net output shape: {logits.shape}") 
+    target_q1.load_state_dict(q1.state_dict())
+    target_q2.load_state_dict(q2.state_dict())
 
+    # Same LR for actor and critics by default; allow faster actor via sac_policy_lr
+    policy_lr = getattr(config, "sac_policy_lr", config.sac_lr)
+    policy_opt = Adam(policy.parameters(), lr=policy_lr)
+    q1_opt = Adam(q1.parameters(), lr=config.sac_lr)
+    q2_opt = Adam(q2.parameters(), lr=config.sac_lr)
+    # Entropy coefficient (alpha) autotuning
+    # Discrete SAC: target entropy should be positive (≈ log(|A|))
+    target_entropy = config.sac_target_entropy_coef * np.log(act_dim)
+    log_alpha = torch.tensor(np.log(config.sac_alpha), device=device, requires_grad=True)
+    alpha_opt = Adam([log_alpha], lr=config.sac_alpha_lr)
 
-
-    # For critics (just Q-value tensor)
-    critic1_net = CoinRunCNN(obs_shape, action_n, return_state=False).to(device)
-    critic2_net = CoinRunCNN(obs_shape, action_n, return_state=False).to(device)
-
-    with torch.no_grad():
-        q1 = critic1_net(sample)
-        print(f"[SANITY] critic1_net output shape: {q1.shape}") 
-
-    critic1 = critic1_net
-    critic2 = critic2_net
-
-    critic1_opt = Adam(critic1.parameters(), lr=config.sac_lr)
-    critic2_opt = Adam(critic2.parameters(), lr=config.sac_lr)
-    actor_opt   = Adam(actor_net.parameters(),   lr=config.sac_lr)
-
-    policy = DiscreteSACPolicy(
-        actor_net,   actor_opt,
-        critic1,     critic1_opt,
-        critic2,     critic2_opt,
-        tau=config.sac_tau,
-        gamma=config.sac_gamma,
-        alpha=config.sac_alpha,
-    ).to(device)
-
-
-    eval_history = []
+    total_env_steps = 0
     global_step = 0
     best_rews_mean = -float("inf")
-    for epoch in trange(config.epochs, desc="Epochs"):
+    # TES-SAC state
+    tes_enabled = getattr(config, "sac_tes_enabled", True)
+    tes_lambda = getattr(config, "sac_tes_lambda", 0.999)
+    tes_avg_th = getattr(config, "sac_tes_avg_threshold", 0.01)
+    tes_std_th = getattr(config, "sac_tes_std_threshold", 0.05)
+    tes_k = getattr(config, "sac_tes_discount_k", 0.9)
+    tes_T = getattr(config, "sac_tes_T", 1000)
+    tes_i = 0
+    tes_start_epoch = getattr(config, "sac_tes_start_epoch", 0)
+    ema_entropy = target_entropy  # initialize EMA around current target
+    ema_var = 0.0
+    print(f"[DEBUG] TES: enabled={tes_enabled} lambda={tes_lambda} avg_th={tes_avg_th} std_th={tes_std_th} k={tes_k} T={tes_T}")
+    print(f"[DEBUG] train_sac: Training variables initialized")
+    print(f"[DEBUG] train_sac: total_env_steps={total_env_steps}, global_step={global_step}, best_rews_mean={best_rews_mean}")
+    print(f"[DEBUG] train_sac: Training config - epochs={config.epochs}, steps_per_batch={config.steps_per_batch}")
+    print(f"[DEBUG] train_sac: SAC config - gamma={config.sac_gamma}, alpha={config.sac_alpha}, tau={config.sac_tau}, batch_size={config.sac_batch_size}")
 
-        if config.random_policy == "first":
-            random_policy = epoch == 0
-        elif config.random_policy == "new":
-            random_policy = schedule.is_new_env()
 
-        # data collection
-        for _ in range(
-            config.pretrain_data_multiplier if (random_policy and config.pretrain_enabled) else 1
-        ):
-            
-            acts, obss, rews, conts, resets = reinterpret_nt_to_t_n_sac(
+    # WARMUP: collect data until replay has enough sequences
+    if hasattr(replay_buffer, "n_valid") and config.sac_warmup_min_sequences > 0:
+        print(f"[DEBUG] train_sac: Warmup start - target sequences={config.sac_warmup_min_sequences}, current={replay_buffer.n_valid}")
+        while replay_buffer.n_valid < config.sac_warmup_min_sequences:
+            acts, obss, rews, conts, resets = reinterpret_nt_to_t_n(
                 *generate_trajectories(
                     config.n_sync * config.gen_seq_len,
                     config.n_sync,
                     wm=None,
-                    ac=None if random_policy else policy,
+                    ac=policy,
                     env_fns=schedule.funcs(),
                     env_repeat=config.env_repeat,
+                    collect_eps=0.05,
                 ),
                 config.data_t,
                 config.data_n,
             )
-            next_obss = torch.cat([obss[1:], obss[-1:]], dim=0)
-            obs_np  = obss.cpu().numpy()
-            act_np  = acts.cpu().numpy()
-            rew_np  = rews.cpu().numpy()
-            term_np = resets.cpu().numpy()
-            next_np = next_obss.cpu().numpy()
-            #print(f"[DEBUG] Pre‑flatten shapes → obs: {obs_np.shape}, act: {act_np.shape}, rew: {rew_np.shape}, term: {term_np.shape}, next_obs: {next_np.shape}")
+            replay_buffer.add(acts, obss, rews, conts, resets)
+            schedule.step()
+            env_steps_warm = acts.shape[0] * acts.shape[1] * config.env_repeat
+            total_env_steps += env_steps_warm
+            print(f"[DEBUG] train_sac: Warmup collected {env_steps_warm} steps; replay sequences={replay_buffer.n_valid}")
+            try:
+                writer.add_scalar("Sample/total_env_steps", total_env_steps, global_step)
+                writer.add_scalar("Sample/replay_buffer_size", replay_buffer.n_valid, global_step)
+            except Exception as tb_err:
+                print(f"[DEBUG] train_sac: TensorBoard write failed: {tb_err}")
+        print(f"[DEBUG] train_sac: Warmup completed - replay sequences={replay_buffer.n_valid}")
 
-            T, N = obs_np.shape[0], obs_np.shape[1]
-            B = T * N
+    for epoch in range(config.epochs):
+        print(f"\n[DEBUG] ===== EPOCH {epoch}/{config.epochs} STARTING =====\n")
 
-            # reshape into B transitions
-            obs_arr  = obs_np.reshape((B,) + obs_np.shape[2:])  
-            print(f"[DEBUG] obs_arr shape: {obs_arr.shape}")
- 
-            act_arr  = act_np.reshape((B,) + act_np.shape[2:])   
-            if act_arr.ndim == 1:
-                act_arr = act_arr[:, None]                        
-
-            rew_arr  = rew_np.reshape(B)                         
-            term_arr = term_np.reshape(B)
-            cont_arr  = conts.cpu().numpy().reshape(B)            
-            next_arr = next_np.reshape((B,) + next_np.shape[2:]) # [B, C, H, W]
-            
-            #print(f"[DEBUG] Flattened shapes → obs: {obs_arr.shape}, act: {act_arr.shape}, rew: {rew_arr.shape}, term: {term_arr.shape}, next_obs: {next_arr.shape}")
-
-            rew_list   = rew_arr.tolist()    
-            term_list  = term_arr.tolist()   
-
-            trunc_list = [
-                (cont_arr[i] == 0) and (not term_list[i])
-                for i in range(B)
-            ]
-
-
-            for _, (o_i, a_i, r_i, d_i, t_i, o2_i) in enumerate(
-                zip(obs_arr, act_arr, rew_list, term_list, trunc_list, next_arr)
-            ):
-                if isinstance(a_i, np.ndarray):
-                    act_scalar = int(a_i.squeeze())
-                else:
-                    act_scalar = int(a_i)
-                ts_buffer.add(Batch(
-                    obs=        o_i,
-                    act=        act_scalar,   # now shape [B]
-                    rew=        r_i,
-                    terminated=d_i,
-                    truncated= t_i,
-                    obs_next=   o2_i
-                ))
-            # debug prints 
-            print(f"[DEBUG]  terminals: {sum(term_list)}  truncations: {sum(trunc_list)}  total: {B}")
-            zeros = int((cont_arr == 0).sum())
-            print(f"[DEBUG] cont_arr zeros: {zeros}")
-            print(f"[DEBUG] term+trunc = {sum(term_list) + sum(trunc_list)}")
-            end_arr = ((cont_arr == 0) | (term_arr == 1))
-            print(f"[DEBUG]  total ends by cont|term: {int(end_arr.sum())}")
-            print(f"[DEBUG]  term+trunc         : {sum(term_list) + sum(trunc_list)}")
-
-
+        
+        # Early exploration epsilon for first few epochs to diversify data
+        early_eps = getattr(config, "sac_collect_eps", 0.05) if epoch < getattr(config, "sac_collect_early_eps_epochs", 15) else 0.0
+        acts, obss, rews, conts, resets = reinterpret_nt_to_t_n(
+            *generate_trajectories(
+                config.n_sync * config.gen_seq_len,
+                config.n_sync,
+                wm=None,
+                ac=policy,
+                env_fns=schedule.funcs(),
+                env_repeat=config.env_repeat,
+                collect_eps=early_eps,
+            ),
+            config.data_t,
+            config.data_n,
+        )
+        print(f"[DEBUG] train_sac: Rewards - rews.shape={rews.shape}, sum={rews.sum().item():.3f}, mean={rews.mean().item():.3f}")
+        print(f"[DEBUG] train_sac: Resets - resets.shape={resets.shape}, sum={resets.sum().item()}, episodes={resets.sum().item()}")
+        
+        replay_buffer.add(acts, obss, rews, conts, resets)
         schedule.step()
 
-        writer.add_scalar("Sample/total_train_iters", global_step, global_step)
+        # SAMPLE METRICS
+        env_steps_this_epoch = acts.shape[0] * acts.shape[1] * config.env_repeat
+        total_env_steps += env_steps_this_epoch
+        print(f"[DEBUG] train_sac: Env steps this epoch: {env_steps_this_epoch}, total: {total_env_steps}")
+        try:
+            writer.add_scalar("Sample/total_env_steps", total_env_steps, global_step)
+            writer.add_scalar("Sample/replay_buffer_size", replay_buffer.n_valid, global_step)
+            writer.add_scalar("Sample/total_train_iters", global_step, global_step)
+        except Exception as tb_err:
+            print(f"[DEBUG] train_sac: TensorBoard write failed: {tb_err}")
 
+        # PERFORMANCE METRICS
         rews_eps_mean = rews.sum().item() / resets.sum().item()
-        writer.add_scalar("Perf/rews_eps_mean", rews_eps_mean, global_step)
         len_eps_mean = config.gen_seq_len / resets.sum().item() * config.env_repeat
-        writer.add_scalar("Perf/len_eps_mean", len_eps_mean, global_step)
+        try:
+            print(f"[DEBUG] train_sac: Performance metrics - rews_eps_mean={rews_eps_mean:.3f}, len_eps_mean={len_eps_mean:.3f}")
+            writer.add_scalar("Perf/rews_eps_mean", rews_eps_mean, global_step)
+            writer.add_scalar("Perf/len_eps_mean", len_eps_mean, global_step)
+        except Exception as tb_err:
+            print(f"[DEBUG] train_sac: TensorBoard write failed: {tb_err}")
 
-        # evaluation every 10 epochs
+        Q1_loss_val = Q2_loss_val = policy_loss_val = None
+
+        # EVALUATION
         if epoch % 10 == 0:
+            print(f"[DEBUG] train_sac: Starting evaluation at epoch {epoch}")
+            print("Evaluation started...")
             eval_means, eval_stds = [], []
-            for efns in schedule.eval_funcs():
-                m, s = evaluate(
+            eval_funcs = schedule.eval_funcs()
+            print(f"[DEBUG] train_sac: Number of evaluation environments: {len(eval_funcs)}")
+            print(f"[DEBUG] train_sac: Eval mode = policy_greedy (deterministic)")
+            
+            for i, efns in enumerate(eval_funcs):
+                print(f"[DEBUG] train_sac: Evaluating environment {i+1}/{len(eval_funcs)}")
+                # Deterministic
+                m_pol, s_pol = evaluate(
                     config.n_sync,
                     wm=None,
                     ac=policy,
@@ -244,52 +247,236 @@ def train_sac(config: Config):
                     env_repeat=config.env_repeat,
                     n_rollouts=256,
                 )
-                eval_means.append(m)
-                eval_stds.append(s)
-            writer.add_scalars(
-                "Perf/eval_rew_eps_mean", {f"{i}": v for i, v in enumerate(eval_means)}, global_step
-            )
-            writer.add_scalars(
-                "Perf/eval_rew_eps_std",  {f"{i}": s for i, s in enumerate(eval_stds)}, global_step
-            )
-            
-            for mean_i, std_i in zip(eval_means, eval_stds):
-                eval_history.append({
-                    "step": global_step,
-                    "Perf/eval_rew_eps_mean": mean_i,
-                    "Perf/eval_rew_eps_std":  std_i
-                })
-            df = pd.DataFrame(eval_history)
-            tqdm.write(df.to_string())
-            csv_path = f"{log_dir}/eval_history.csv"
-            df.to_csv(csv_path, index=False)
+                print(f"[DEBUG] train_sac: Env {i+1} eval - policy_greedy(mean={m_pol:.3f}, std={s_pol:.3f})")
+                eval_means.append(m_pol)
+                eval_stds.append(s_pol)
+                
+            try:
+                writer.add_scalars("Perf/eval_rew_eps_mean", {f"{i}": v for i, v in enumerate(eval_means)}, global_step)
+                writer.add_scalars("Perf/eval_rew_eps_std", {f"{i}": s for i, s in enumerate(eval_stds)}, global_step)
+            except Exception as tb_err:
+                print(f"[DEBUG] train_sac: TensorBoard write failed: {tb_err}")
+            print(f"Eval means: {eval_means}")
+            print(f"Eval stds: {eval_stds}")
+            print(f"global_step: {global_step}")
 
-    
-            
             approx_perf = float(np.mean(eval_means))
-            writer.add_scalar("Perf/approx_perf", approx_perf, epoch)
+            print(f"[DEBUG] train_sac: Overall performance: {approx_perf:.3f} (previous best: {best_rews_mean:.3f})")
+            try:
+                writer.add_scalar("Perf/approx_perf", approx_perf, global_step)
+            except Exception as tb_err:
+                print(f"[DEBUG] train_sac: TensorBoard write failed: {tb_err}")
             if approx_perf >= best_rews_mean:
+                print(f"[DEBUG] train_sac: New best performance! Saving models...")
                 best_rews_mean = approx_perf
-                torch.save(actor_net.state_dict(),   log_dir / "actor_best.pth")
-                torch.save(critic1.state_dict(), log_dir / "critic1_best.pth")
-                torch.save(critic2.state_dict(), log_dir / "critic2_best.pth")
+                torch.save(policy.state_dict(), log_dir / "save_sac_policy_best.pt")
+                torch.save(q1.state_dict(),      log_dir / "save_sac_q1_best.pt")
+                torch.save(q2.state_dict(),      log_dir / "save_sac_q2_best.pt")
+                print(f"[DEBUG] train_sac: Best models saved to {log_dir}")
+            else:
+                print(f"[DEBUG] train_sac: Performance not improved, keeping previous best")
+        
         schedule.step()
-        # SAC updates
-        for _ in range(config.steps_per_batch): # config.steps_per_batch = 1000 in configs files which is too low for sac
-            losses = policy.update(
-                config.sac_batch_size,
-                ts_buffer
-            )
 
-            if global_step % config.log_frequency == 0:
-                writer.add_scalar("Metric/actor_loss",   losses['loss/actor'],   global_step)
-                writer.add_scalar("Metric/critic1_loss", losses['loss/critic1'], global_step)
-                writer.add_scalar("Metric/critic2_loss", losses['loss/critic2'], global_step)
+        # SAC UPDATES
+        print(f"[DEBUG] train_sac: Starting SAC updates for epoch {epoch}")
+
+
+        q1_loss_sum = 0.0
+        q2_loss_sum = 0.0
+        policy_loss_sum = 0.0
+        entropy_sum = 0.0
+        last_q1_loss = None
+        last_q2_loss = None
+        last_policy_loss = None
+        last_entropy = None
+        for step in range(config.steps_per_batch):
+            mb_acts, mb_obs, mb_rews, _, mb_resets = replay_buffer.minibatch(
+                mb_t=2, mb_n=config.sac_batch_size, mb_device=device.type
+            )
+            s      = mb_obs[0].to(device)
+            s_next = mb_obs[1].to(device)
+            a_t    = mb_acts[1].to(device)
+            r_t    = mb_rews[1].to(device)
+            nonterm = (1 - mb_resets[1]).float().to(device)
+
+            # targets
+            with torch.no_grad():
+                # Discrete SAC target on s_next
+                next_logits = policy(s_next)
+                next_log_probs = torch.log_softmax(next_logits, dim=-1)
+                next_probs = torch.softmax(next_logits, dim=-1)
+                tq1_all = target_q1(s_next)
+                tq2_all = target_q2(s_next)
+                min_q_next = torch.min(tq1_all, tq2_all)
+                alpha = log_alpha.exp().detach()
+                v_next = (next_probs * (min_q_next - alpha * next_log_probs)).sum(dim=-1, keepdim=True)
+                target_Q = r_t + config.sac_gamma * nonterm * v_next
+
+            # Q losses and update
+            # Compute Q losses
+            # Q(s,a) gather on chosen actions (one-hot -> indices)
+            act_idx = a_t.argmax(dim=-1) if a_t.dim() == 2 else a_t
+            q1_all = q1(s)
+            q2_all = q2(s)
+            q1_pred = q1_all.gather(1, act_idx.long().unsqueeze(-1))
+            q2_pred = q2_all.gather(1, act_idx.long().unsqueeze(-1))
+            
+            q1_loss = nn.MSELoss()(q1_pred, target_Q)
+            q2_loss = nn.MSELoss()(q2_pred, target_Q)
+            total_q_loss = q1_loss + q2_loss
+            # Joint backward for shared encoder
+            q1_opt.zero_grad(); q2_opt.zero_grad()
+            total_q_loss.backward()
+            torch.nn.utils.clip_grad_norm_(q1.parameters(), config.sac_grad_clip)
+            torch.nn.utils.clip_grad_norm_(q2.parameters(), config.sac_grad_clip)
+            q1_opt.step(); q2_opt.step()
+            # Accumulate losses
+            q1_loss_sum += float(q1_loss.item())
+            q2_loss_sum += float(q2_loss.item())
+            last_q1_loss = float(q1_loss.item())
+            last_q2_loss = float(q2_loss.item())
+
+            # policy loss and update
+            # Policy loss: maximize E[Q - alpha*logpi] -> minimize alpha*logpi - Q
+            logits = policy(s)
+            log_probs = torch.log_softmax(logits, dim=-1)
+            probs = torch.softmax(logits, dim=-1)
+            q1_all = q1(s)
+            q2_all = q2(s)
+            q_min = torch.min(q1_all, q2_all).detach()
+            alpha = log_alpha.exp().detach()
+            policy_loss = (probs * (alpha * log_probs - q_min)).sum(dim=-1).mean()
+            
+            policy_opt.zero_grad(); policy_loss.backward()
+            torch.nn.utils.clip_grad_norm_(policy.parameters(), config.sac_grad_clip)
+            policy_opt.step()
+            
+            # Alpha (entropy) loss update
+            with torch.no_grad():
+                entropy = -(probs * log_probs).sum(dim=-1).mean()
+            # Correct sign for gradient descent: if entropy > target → decrease alpha; if entropy < target → increase alpha
+            alpha_loss = log_alpha * (entropy - target_entropy)
+            alpha_opt.zero_grad(); alpha_loss.backward(); alpha_opt.step()
+            # Clamp log_alpha to avoid runaway in early training
+            with torch.no_grad():
+                log_alpha.clamp_(min=np.log(getattr(config, "sac_alpha_min", 1e-6)), max=np.log(getattr(config, "sac_alpha_max", 1.0)))
+                # TES-SAC: update target_entropy by annealing when EMA entropy stabilizes
+                if tes_enabled and (epoch >= tes_start_epoch):
+                    # Exponential moving average and variance of policy entropy
+                    delta = float(entropy.item()) - float(ema_entropy)
+                    ema_entropy = float(ema_entropy) + (1.0 - tes_lambda) * delta
+                    ema_var = tes_lambda * (ema_var + (1.0 - tes_lambda) * (delta ** 2))
+                    ema_std = (ema_var ** 0.5)
+                    tes_i += 1
+                    # Check stability window and thresholds
+                    if (abs(float(target_entropy) - ema_entropy) <= tes_avg_th) and (ema_std <= tes_std_th):
+                        if tes_i >= tes_T:
+                            old_te = float(target_entropy)
+                            target_entropy = float(target_entropy) * tes_k
+                            tes_i = 0
+                            print(f"[DEBUG] TES: anneal target_entropy {old_te:.4f} -> {float(target_entropy):.4f} (ema={ema_entropy:.4f}, std={ema_std:.4f})")
+                    else:
+                        # reset counter if not stable
+                        tes_i = 0
+            # Accumulate entropy metrics
+            entropy_sum += float(entropy.item())
+            last_entropy = float(entropy.item())
+            # Accumulate losses
+            policy_loss_sum += float(policy_loss.item())
+            last_policy_loss = float(policy_loss.item())
+
+            # soft updates
+            
+            # Track parameter changes for debugging
+            q1_param_change = 0.0
+            q2_param_change = 0.0
+            param_count = 0
+            
+            for p, tp in zip(q1.parameters(), target_q1.parameters()):
+                old_tp = tp.data.clone()
+                tp.data.mul_(1 - config.sac_tau)
+                tp.data.add_(config.sac_tau * p.data)
+                if step == 0:
+                    q1_param_change += (tp.data - old_tp).abs().sum().item()
+                    param_count += tp.numel()
+                    
+            for p, tp in zip(q2.parameters(), target_q2.parameters()):
+                old_tp = tp.data.clone()
+                tp.data.mul_(1 - config.sac_tau)
+                tp.data.add_(config.sac_tau * p.data)
+                if step == 0:
+                    q2_param_change += (tp.data - old_tp).abs().sum().item()
+            
+            # Skip per-step parameter change reporting
+
+            # Cache last-step losses
+            Q1_loss_val     = last_q1_loss
+            Q2_loss_val     = last_q2_loss
+            policy_loss_val = last_policy_loss
+            
             global_step += 1
+            
+        q1_loss_mean = q1_loss_sum / config.steps_per_batch
+        q2_loss_mean = q2_loss_sum / config.steps_per_batch
+        policy_loss_mean = policy_loss_sum / config.steps_per_batch
+        entropy_mean = entropy_sum / config.steps_per_batch if last_entropy is not None else float('nan')
+        alpha_current = float(torch.exp(log_alpha).item())
+        print(
+            f"[DEBUG] train_sac: Updates summary - steps={config.steps_per_batch}, "
+            f"Q1_mean={q1_loss_mean:.6f}, Q2_mean={q2_loss_mean:.6f}, Policy_mean={policy_loss_mean:.6f}, "
+            f"alpha={alpha_current:.6f}, policy_entropy_mean={entropy_mean:.6f}"
+        )
+        # Use means as epoch losses for logging
+        Q1_loss_val = q1_loss_mean
+        Q2_loss_val = q2_loss_mean
+        policy_loss_val = policy_loss_mean
+
+        # METRIC LOGS
+        # Compute gradient norm without mutating stored grads
+        total_sq_norm = 0.0
+        for p in q1.parameters():
+            if p.grad is not None:
+                g = p.grad.detach()
+                total_sq_norm += float(g.pow(2).sum().item())
+        grad_norm = total_sq_norm ** 0.5
+        print(f"[DEBUG] train_sac: Gradient norm (Q1): {grad_norm:.6f}")
+        try:
+            writer.add_scalar("Metric/grad_norm", grad_norm, global_step)
+        except Exception as tb_err:
+            print(f"[DEBUG] train_sac: TensorBoard write failed: {tb_err}")
+        
+        if Q1_loss_val is not None:
+            print(f"[DEBUG] train_sac: Final epoch losses - Q1:{Q1_loss_val:.6f}, Q2:{Q2_loss_val:.6f}, Policy:{policy_loss_val:.6f}")
+            try:
+                writer.add_scalar("Metric/Q1_loss",    Q1_loss_val,    global_step)
+                writer.add_scalar("Metric/Q2_loss",    Q2_loss_val,    global_step)
+                writer.add_scalar("Metric/Policy_loss", policy_loss_val, global_step)
+            except Exception as tb_err:
+                print(f"[DEBUG] train_sac: TensorBoard write failed: {tb_err}")
+        else:
+            print(f"[DEBUG] train_sac: No updates performed this epoch (insufficient replay buffer data)")
+            
+        print(f"[DEBUG] ===== EPOCH {epoch}/{config.epochs} COMPLETED =====\n")
+        torch.cuda.empty_cache()
+
 
 
     # FINAL CHECKPOINT
-    torch.save(actor_net.state_dict(),   log_dir / "actor.pth")
-    torch.save(critic1.state_dict(), log_dir / "critic1.pth")
-    torch.save(critic2.state_dict(), log_dir / "critic2.pth")
+    print(f"[DEBUG] train_sac: Training completed! Saving final models...")
+    torch.save(policy.state_dict(), log_dir / "policy.pt")
+    torch.save(q1.state_dict(),      log_dir / "q1.pt")
+    torch.save(q2.state_dict(),      log_dir / "q2.pt")
+    print(f"[DEBUG] train_sac: Final models saved to {log_dir}")
+    print(f"[DEBUG] train_sac: Final training stats - total_env_steps:{total_env_steps}, global_step:{global_step}, best_performance:{best_rews_mean:.3f}")
     writer.close()
+    print(f"[DEBUG] train_sac: TensorBoard writer closed. Training finished!")
+    return float(best_rews_mean)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True, help="Path to config JSON")
+    args = parser.parse_args()
+    cfg = Config.from_file(Path(args.config))
+    train_sac(cfg)

@@ -1,6 +1,16 @@
 from typing import Any, Callable, Optional, List
 
+import os
 import cv2
+
+# IMPORTANT: On some HPC systems (e.g., MPICH/Hydra-based clusters), vendor MPI
+# libraries can auto-initialize if certain environment variables are present
+# (PMI_*, OMPI_*, MPI_*). Procgen/gym does not require MPI. Unset these to avoid
+# accidental MPI_Init in system libraries that leads to PMI errors.
+for _var in list(os.environ.keys()):
+    if _var.startswith(("PMI_", "OMPI_", "MPI_")):
+        os.environ.pop(_var, None)
+
 import gym
 import numpy as np
 import torch
@@ -111,34 +121,39 @@ def evaluate(
     wm: Optional[WorldModel] = None,
     ac: Optional[ActorCritic] = None,
     env_fns: Optional[List[Callable[[], Any]]] = None,
-    env_repeat: int = 4,
-    n_rollouts: int = 10,
+    env_repeat: int = 1,
+    n_rollouts: int = 100,
 ) -> Tuple[float, float]:
-    _, _, rews, conts, resets = generate_trajectories(
-        n_rollouts * 2**13 // n_sync,
-        n_sync,
-        wm,
-        ac,
-        env_fns,
-        env_repeat,
-        n_rollouts,
-        no_images=True,
+    env = SyncVectorEnvAtHome(
+        [
+            env_fns[i]
+            if env_fns is not None
+            else (lambda: gym.make("procgen:procgen-coinrun-v0"))
+            for i in range(n_sync)
+        ],
+        repeat=env_repeat,
     )
-    terms = torch.where(conts == 0)[0]
-    starts = torch.where(resets == 1)[0]
-    collection = [(t.item(), "E") for t in terms] + [(s.item(), "S") for s in starts]
-    collection.sort()
-    where_se = []
-    for i in range(len(collection) - 1):
-        (si, s), (ei, e) = collection[i : i + 2]
-        if s == "S" and e == "E":
-            where_se.append((si, ei))
-    eps_rews = [rews[s : e + 1].sum().item() for s, e in where_se]
-    if not eps_rews:
-        n_eps = resets.sum().item()
-        var = rews.var().item() * rews.numel() / n_eps**2
-        return rews.sum().item() / n_eps, np.sqrt(var)
-    return np.mean(eps_rews), np.std(eps_rews)
+    obs = env.reset()
+    ep_returns: list[float] = []
+    ret = np.zeros(n_sync, dtype=np.float32)
+    while len(ep_returns) < n_rollouts:
+        if ac is not None:
+            policy_device = next(ac.parameters()).device if isinstance(ac, torch.nn.Module) else "cpu"
+            obs_t = torch.from_numpy(obs / 255).float().permute(0, 3, 1, 2).to(policy_device)
+            logits = ac(obs_t)
+            act = torch.argmax(logits, dim=-1).cpu().numpy()
+        else:
+            act = np.random.randint(0, 15, size=n_sync)
+
+        obs, rew, reset, _ = env.step(act)
+        ret += rew
+        for i in range(n_sync):
+            if reset[i]:
+                ep_returns.append(float(ret[i]))
+                ret[i] = 0.0
+                if len(ep_returns) >= n_rollouts:
+                    break
+    return float(np.mean(ep_returns)), float(np.std(ep_returns))
 
 
 @torch.no_grad()
@@ -151,6 +166,8 @@ def generate_trajectories(
     env_repeat: int = 1,
     target_terminals: Optional[int] = None,
     no_images: bool = False,
+    deterministic: bool = False,
+    collect_eps: float = 0.05,
 ) -> Tuple[ActionT, ImageT, RewardT, ContT, ResetT]:
     assert env_repeat == 1
     # Returns [ X ... ] packed as [ N*T ... ] (sort of)
@@ -166,11 +183,11 @@ def generate_trajectories(
     obss = [DummyList() if no_images else [] for _ in range(n_sync)]  # [ N T 64 64 3 ] uint8
     rews = [[] for _ in range(n_sync)]  # [ N T ] float
     conts = [[] for _ in range(n_sync)]  # [ N T ] bool
-    # Important: should be 1 for new sequence
     resets = [[] for _ in range(n_sync)]  # [ N T ] bool
     n_samples = 0
     n_terminals = 0
 
+    
     env = SyncVectorEnvAtHome(
         [
             env_fns[i]
@@ -179,6 +196,7 @@ def generate_trajectories(
                 lambda: gym.make(
                     "procgen:procgen-coinrun-v0",
                 )
+                
             )
             for i in range(n_sync)
         ]
@@ -207,14 +225,11 @@ def generate_trajectories(
                 continue
 
             n_samples += n_sync
-            if wm is None or ac is None:
-                act = np.random.randint(0, 15, size=n_sync)
-            else:
+            if wm is not None and ac is not None:
                 if z is None:
                     z, h = wm.rssm.initial_state(n_sync)
                     act_t = torch.zeros(n_sync, 15, device=z.device)
-                    act_t[:, 0] = 1  # Previous move would have been all 0s
-                # Follow a stochastic policy
+                    act_t[:, 0] = 1
                 _, z, h = wm.rssm(
                     z,
                     act_t,
@@ -228,6 +243,23 @@ def generate_trajectories(
                 act = act_prob_dist.sample()
                 act_t = torch.nn.functional.one_hot(act, 15)
                 act = act.cpu().numpy()
+            elif ac is not None:
+                with torch.no_grad():
+                    policy_device = next(ac.parameters()).device if isinstance(ac, torch.nn.Module) else "cpu"
+                    obs_t = torch.from_numpy(obs / 255).float().permute(0, 3, 1, 2).to(policy_device)
+                    logits = ac(obs_t)
+                    if deterministic:
+                        act = logits.argmax(dim=-1).cpu().numpy()
+                    else:
+                        dist = td.Categorical(logits=logits)
+                        act = dist.sample().cpu().numpy()
+                        # Epsilon-greedy exploration during data collection to avoid early collapse
+                        if collect_eps > 0.0:
+                            mask = np.random.rand(n_sync) < collect_eps
+                            rand_act = np.random.randint(0, 15, size=n_sync)
+                            act = np.where(mask, rand_act, act)
+            else:
+                act = np.random.randint(0, 15, size=n_sync)
 
             obs, rew, reset, _ = env.step(act)
             # When there is an episode termination (`reset`):
@@ -264,7 +296,7 @@ def generate_trajectories(
         torch.from_numpy(np.concatenate(conts)[:n]).float().unsqueeze(-1),
         torch.from_numpy(np.concatenate(resets)[:n]).float().unsqueeze(-1),
     )
-# for dv3/wmar
+
 
 def reinterpret_nt_to_t_n(
     acts: ActionT, obss: ImageT, rews: RewardT, conts: ContT, resets: ResetT, t: int, n: int
@@ -278,38 +310,3 @@ def reinterpret_nt_to_t_n(
         conts.reshape(n, t, 1).swapaxes(0, 1),
         resets.reshape(n, t, 1).swapaxes(0, 1),
     )
-
-# for sac
-def reinterpret_nt_to_t_n_sac(
-    acts,    # shape=(t*n, …)
-    obss,    # shape=(t*n, …)
-    rews,    # shape=(t*n, …)
-    conts,   # shape=(t*n, …)
-    resets,  # shape=(t*n, …)
-    t: int,
-    n: int
-):
-    if acts.shape[0] != t * n:
-        raise ValueError(
-            f"Illegal reinterpret (got {acts.shape[0]} rows; expected {t*n})"
-        )
-    # helper to reshape any array of shape (t*n, *D) → (t, n, *D)
-    def _reshape(x):
-        tail = x.shape[1:]                # capture any extra dims
-        return x.reshape((n, t) + tail)  \
-                .swapaxes(0, 1)           # now (t, n, *tail)
-
-    # 1) reshape everything
-    acts_tn  = _reshape(acts)
-    obss_tn  = _reshape(obss)
-    rews_tn  = _reshape(rews)
-    conts_tn = _reshape(conts)
-    res_tn   = _reshape(resets)
-
-    # 2) if your actions are one‑hot vectors, convert to indices:
-    #    detect by “has extra last dim > 1”
-    if acts_tn.ndim > 2:
-        # e.g. acts_tn.shape == (t, n, action_dim)
-        acts_tn = acts_tn.argmax(-1)   # now shape (t, n)
-
-    return acts_tn, obss_tn, rews_tn, conts_tn, res_tn

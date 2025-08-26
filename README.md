@@ -35,9 +35,8 @@ And includes:
 
 ## Running an Algorithm
 
-All runs use the same `train.py` script. You must use a config file with `--config`. For example:
 
 ```bash
-python train.py --config "config.json"
+python sac.py --config "config.json"
 ```
 

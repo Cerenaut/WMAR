@@ -23,7 +23,7 @@ approaches for continual reinforcement learning justifying further research.
 
 ## Repository Layout
 - `Code/`
-  - `ARROW & DV3/`
+  - `ARROW_and_DV3/`
     - `Atari/`
       - `train.py` — entrypoint for ARROW/DV3 runs.
       - `ac.py`, `wm.py`, `rssm.py`, `vae.py`, `replay.py`, `config.py`, `generate_trajectory.py` — actor-critic, world model, latent dynamics, VAE, replay buffer, default hyperparameters, and trajectory generation utilities.
@@ -58,8 +58,9 @@ pip install -r requirements.txt
 - The `requirements.txt` pins CUDA 11.8 wheels for PyTorch; adjust the `--extra-index-url` or versions if your CUDA/toolkit differs.
 
 ## Running Locally
-- ARROW or DV3: `python train.py --config /path/to/config.json`
-- SAC: `python sac.py --config /path/to/config.json`
+- `cd path/to/ARROW/Folder`
+- ARROW and DV3: `python Code/ARROW_and_DV3/Atari/train.py --config /path/to/config.json`
+- SAC: `Code/SAC/Atari/sac.py --config /path/to/config.json`
 
 ## SLURM Usage (example)
 The jobs are typically run as arrays, one config per task id:
@@ -77,8 +78,8 @@ The jobs are typically run as arrays, one config per task id:
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate arrow
 
-# Move to project directory
-cd /path/to/ARROW
+# Move to project directory (example)
+cd "/path/to/ARROW/" 
 
 # Collect config files (sorted)
 mapfile -t configs < <(ls "Configs/Atari configs/Single-task configs"/*.json | sort)
@@ -87,9 +88,9 @@ config_file="${configs[$SLURM_ARRAY_TASK_ID]}"
 echo "[$SLURM_ARRAY_TASK_ID] $(date) → $config_file"
 
 # Run experiment
-    python train.py --config "$config_file"
-# or
-#   python sac.py --config "$config_file"
+    python Code/ARROW_and_DV3/Atari/train.py --config "$config_file"
+# or for sac
+#   python Code/SAC/Atari/sac.py --config "$config_file"
 ```
 
 

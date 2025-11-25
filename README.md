@@ -34,7 +34,7 @@ approaches for continual reinforcement learning justifying further research.
       - `ac.py`, `rssm.py`, `vae.py`, `replay.py`, `config.py`, `generate_trajectory.py` — SAC components and helpers.
     - `CoinRun/` — same file set as Atari, tailored for Procgen CoinRun.
 - `Configs/`
-  - `Atari configs/` - Note: all config files named with task (game), task id `e*`, seed `s*`, and algorithm.
+  - `Atari configs/` - Note: all config files named with task (game), task id `e*`, seed `s*`, and method (ARROW, DV3, and SAC).
     - `CL-task configs/` — continual-learning configs for ARROW, DV3, and SAC.
     - `Single-task configs/` — per-game Atari configs for ARROW, DV3, and SAC.
   - `ConRun configs/`
@@ -96,5 +96,6 @@ echo "[$SLURM_ARRAY_TASK_ID] $(date) → $config_file"
 
 ## Tips
 - Adjust SLURM directives (partition, GPU type, memory, time) to your cluster.
-- Keep configs sorted and align seeds across algorithms to simplify comparisons.
+- Each config file contains the sequence of tasks (or single task), seed, and method.
+- Keep configs sorted and align seeds across methods to simplify comparisons.
 - Log files in `logs/` will follow the `%A_%a` pattern; ensure the directory exists before launching jobs.

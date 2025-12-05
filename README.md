@@ -95,7 +95,7 @@ echo "[$SLURM_ARRAY_TASK_ID] $(date) → $config_file"
 
 
 ## Tips
-- Adjust SLURM directives (partition, GPU type, memory, time) to your cluster.
+- Adjust SLURM directives (partition, GPU type, memory, time) to your cluster (if you're using SLURM)
 - Each config file contains the sequence of tasks (or single task), seed, and method.
 - Keep configs sorted and align seeds across methods to simplify comparisons.
 - Log files in `logs/` will follow the `%A_%a` pattern; ensure the directory exists before launching jobs.

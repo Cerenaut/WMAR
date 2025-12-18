@@ -56,6 +56,22 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 - The `requirements.txt` pins CUDA 11.8 wheels for PyTorch; adjust the `--extra-index-url` or versions if your CUDA/toolkit differs.
+  
+### Procgen installation (HPC-safe)
+
+Procgen requires a native C++ build and must not be installed in editable mode.
+```bash
+
+export TMPDIR=/tmp/${USER}-procgen
+mkdir -p "$TMPDIR"
+
+git clone https://github.com/openai/procgen.git /tmp/procgen_build
+cd /tmp/procgen_build
+git checkout 5e1dbf341d291eff40d1f9e0c0a0d5003643aebf
+pip install .
+```
+
+
 
 ## Running Locally
 - `cd path/to/ARROW/Folder`

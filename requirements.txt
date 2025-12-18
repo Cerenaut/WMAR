@@ -14,5 +14,3 @@ tqdm==4.67.1
 sortedcontainers==2.4.0
 tensorboard==2.13.0
 tensorboard-data-server==0.7.2
-#procgen
--e git+https://github.com/openai/procgen.git@5e1dbf341d291eff40d1f9e0c0a0d5003643aebf#egg=procgen

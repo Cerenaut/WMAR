@@ -115,3 +115,12 @@ echo "[$SLURM_ARRAY_TASK_ID] $(date) → $config_file"
 - Each config file contains the sequence of tasks (or single task), seed, and method.
 - Keep configs sorted and align seeds across methods to simplify comparisons.
 - Log files in `logs/` will follow the `%A_%a` pattern; ensure the directory exists before launching jobs.
+- Config filenames use short seed IDs (`s*`). The table below shows their corresponding numeric seeds:
+
+| Seed ID | Seed |
+|--------:|-----:|
+| `s0` | `123456789` |
+| `s1` | `1337` |
+| `s2` | `31337` |
+| `s3` | `42` |
+| `s4` | `987654321` |

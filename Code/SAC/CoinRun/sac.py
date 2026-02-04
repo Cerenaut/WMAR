@@ -1,17 +1,4 @@
 # sac.py
-"""
-SAC (Soft Actor-Critic) training script with HPC-safe I/O handling.
-
-HPC Cluster Setup:
-- All runtime I/O (TensorBoard logs, config files, model checkpoints) is redirected
-  to /tmp to avoid /fs04 quota issues.
-- Set environment variables to override defaults:
-  - RUN_ROOT: Directory for TensorBoard logs and config files (default: /tmp)
-  - CHECKPOINT_DIR: Directory for model checkpoints (default: /tmp)
-  - TMPDIR: Temporary files directory (default: /tmp)
-- After training completes, archive results from /tmp to /fs04 if needed.
-- All file operations are wrapped in try/except to handle quota errors gracefully.
-"""
 import os
 import socket
 from datetime import datetime
@@ -31,18 +18,7 @@ from generate_trajectory import (
 from vae import Encoder
 
 from typing import Optional
-os.environ["TENSORBOARD_BINARY_WRITE"] = "0"
 
-# --- HPC-safe I/O: redirect all runtime I/O to /tmp to avoid /fs04 quota issues ---
-# Set TMPDIR for any temporary files created by libraries
-if "TMPDIR" not in os.environ:
-    os.environ["TMPDIR"] = "/tmp"
-
-# Default to /tmp for all runtime I/O if not explicitly set
-# RUN_ROOT: TensorBoard logs and config files
-# CHECKPOINT_DIR: Model checkpoints (.pt files)
-RUN_ROOT = Path(os.environ.get("RUN_ROOT", "/tmp")).expanduser()
-CHECKPOINT_ROOT = Path(os.environ.get("CHECKPOINT_DIR", "/tmp")).expanduser()
 
 class QNetwork(nn.Module):
     def __init__(self, in_channels: int, action_dim: int, config: Config, encoder: Optional[Encoder] = None):
@@ -110,34 +86,15 @@ def train_sac(config: Config):
     job_id = os.getenv("SLURM_JOB_ID")
     run_name = f"{current_time}_{socket.gethostname()}_{config.seed}_{job_id}"
     print(f"train_sac: run_name={run_name}")
-
-
-    # Use global RUN_ROOT (defaults to /tmp if not set)
-    RUN_ROOT.mkdir(parents=True, exist_ok=True)
-    
-    log_dir = RUN_ROOT / "reveresed_order" / run_name
+    # Use absolute log directory to avoid issues on HPC with changing CWD or cleanup
+    log_root = Path.cwd() / "runs" / "reveresed_order"
+    log_root.mkdir(parents=True, exist_ok=True)
+    log_dir = log_root / run_name
     log_dir.mkdir(parents=True, exist_ok=True)
-    
     print(f"train_sac: log_dir={log_dir}")
-    
-    # Save config with error handling (may fail if disk quota exceeded)
-    try:
-        config.save(log_dir / "config.json")
-    except Exception as e:
-        print(f"train_sac: Config save failed: {e}")
-        # Continue anyway - config is not critical for training
-    
-    # TensorBoard writer with throttled writes
-    writer = SummaryWriter(
-        log_dir=str(log_dir),
-        flush_secs=60,  # Increased from 30 to reduce write frequency
-        max_queue=1,
-    )
+    config.save(log_dir / "config.json")
+    writer = SummaryWriter(log_dir=str(log_dir.resolve()), flush_secs=10)
 
-    # Where to save large .pt files (defaults to /tmp if CHECKPOINT_DIR not set)
-    ckpt_dir = CHECKPOINT_ROOT / run_name
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    print(f"train_sac: ckpt_dir={ckpt_dir}")
 
 
     schedule = config.get_env_schedule()
@@ -239,12 +196,9 @@ def train_sac(config: Config):
         if rews_eps_mean >= best_rews_mean:
             best_rews_mean = rews_eps_mean
             print(f"Saving best rews eps mean {rews_eps_mean=}")
-            try:
-                torch.save(policy.state_dict(), ckpt_dir / "save_sac_policy_best.pt")
-                torch.save(q1.state_dict(),     ckpt_dir / "save_sac_q1_best.pt")
-                torch.save(q2.state_dict(),     ckpt_dir / "save_sac_q2_best.pt")
-            except Exception as save_err:
-                print(f"train_sac: Model save failed (disk quota?): {save_err}")
+            torch.save(policy.state_dict(), log_dir / "save_sac_policy_best.pt")
+            torch.save(q1.state_dict(),      log_dir / "save_sac_q1_best.pt")
+            torch.save(q2.state_dict(),      log_dir / "save_sac_q2_best.pt")
 
         Q1_loss_val = Q2_loss_val = policy_loss_val = None
 
@@ -303,7 +257,7 @@ def train_sac(config: Config):
         for step in range(config.steps_per_batch):
             # two-step windows to build (s, a, r, s_next, nonterm)
             mb_acts, mb_obs, mb_rews, _, mb_resets = replay_buffer.minibatch(
-                mb_t=config.mb_t_size, mb_n=config.sac_batch_size, mb_device=device.type
+                mb_t=2, mb_n=config.sac_batch_size, mb_device=device.type
             )
             s      = mb_obs[0].to(device)
             s_next = mb_obs[1].to(device)
@@ -490,23 +444,13 @@ def train_sac(config: Config):
 
     # FINAL CHECKPOINT
     print(f"train_sac: Training completed! Saving final models...")
-    try:
-        torch.save(policy.state_dict(), ckpt_dir / "policy.pt")
-        torch.save(q1.state_dict(),     ckpt_dir / "q1.pt")
-        torch.save(q2.state_dict(),     ckpt_dir / "q2.pt")
-        print(f"train_sac: Final models saved to {ckpt_dir}")
-    except Exception as save_err:
-        print(f"train_sac: Final model save failed (disk quota?): {save_err}")
-        # Continue to close writer and finish
-    
+    torch.save(policy.state_dict(), log_dir / "policy.pt")
+    torch.save(q1.state_dict(),      log_dir / "q1.pt")
+    torch.save(q2.state_dict(),      log_dir / "q2.pt")
+    print(f"train_sac: Final models saved to {log_dir}")
     print(f"train_sac: Final training stats - total_env_steps:{total_env_steps}, global_step:{global_step}, best_performance:{best_rews_mean:.3f}")
-    
-    try:
-        writer.close()
-        print(f"train_sac: TensorBoard writer closed. Training finished!")
-    except Exception as close_err:
-        print(f"train_sac: TensorBoard writer close failed: {close_err}")
-    
+    writer.close()
+    print(f"train_sac: TensorBoard writer closed. Training finished!")
     return float(best_rews_mean)
 
 

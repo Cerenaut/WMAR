@@ -236,6 +236,14 @@ def train_sac(config: Config):
         except Exception as tb_err:
             print(f"train_sac: TensorBoard write failed: {tb_err}")
 
+        # Save best model based on training reward mean (unified with train.py)
+        if rews_eps_mean >= best_rews_mean:
+            best_rews_mean = rews_eps_mean
+            print(f"Saving best rews eps mean {rews_eps_mean=}")
+            torch.save(policy.state_dict(), log_dir / "save_sac_policy_best.pt")
+            torch.save(q1.state_dict(),      log_dir / "save_sac_q1_best.pt")
+            torch.save(q2.state_dict(),      log_dir / "save_sac_q2_best.pt")
+
         Q1_loss_val = Q2_loss_val = policy_loss_val = None
 
         # EVALUATION
@@ -272,20 +280,11 @@ def train_sac(config: Config):
             print(f"global_step: {global_step}")
 
             approx_perf = float(np.mean(eval_means))
-            print(f"train_sac: Overall performance: {approx_perf:.3f} (previous best: {best_rews_mean:.3f})")
+            print(f"train_sac: Overall performance: {approx_perf:.3f}")
             try:
                 writer.add_scalar("Perf/approx_perf", approx_perf, global_step)
             except Exception as tb_err:
                 print(f"train_sac: TensorBoard write failed: {tb_err}")
-            if approx_perf >= best_rews_mean:
-                print(f"train_sac: New best performance! Saving models...")
-                best_rews_mean = approx_perf
-                torch.save(policy.state_dict(), log_dir / "save_sac_policy_best.pt")
-                torch.save(q1.state_dict(),      log_dir / "save_sac_q1_best.pt")
-                torch.save(q2.state_dict(),      log_dir / "save_sac_q2_best.pt")
-                print(f"train_sac: Best models saved to {log_dir}")
-            else:
-                print(f"train_sac: Performance not improved, keeping previous best")
         
         # SAC UPDATES
         print(f"train_sac: Starting SAC updates for epoch {epoch}")
